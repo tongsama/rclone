@@ -575,17 +575,25 @@ func (vfs *VFS) OpenFile(name string, flags int, perm os.FileMode) (fd Handle, e
 		return nil, EINVAL
 	}
 
-	if vfs.Opt.KazLookupByPath && flags&os.O_CREATE != 0 && flags&os.O_TRUNC != 0 && flags&os.O_EXCL == 0 {
-		// Truncating makes existence irrelevant, so avoid remote lookups.
-		dir, leaf, err := vfs.StatParent(name)
+	// Truncating makes existence irrelevant, so avoid remote lookups. Only
+	// with the cache off: a failed Put (e.g. a directory of that name) is
+	// then returned by Close, whereas writeback would fail it after Close.
+	if vfs.Opt.KazLookupByPath && vfs.Opt.CacheMode == vfscommon.CacheModeOff &&
+		flags&os.O_CREATE != 0 && flags&os.O_TRUNC != 0 && flags&os.O_EXCL == 0 {
+		var dir *Dir
+		var leaf string
+		dir, leaf, err = vfs.StatParent(name)
 		if err != nil {
 			return nil, err
 		}
-		file, err := dir.kazCreateNoLookup(leaf)
-		if err != nil {
-			return nil, err
+		if _, isMeta := vfs.isMetadataFile(leaf); !isMeta {
+			var file *File
+			file, err = dir.kazCreateNoLookup(leaf)
+			if err != nil {
+				return nil, err
+			}
+			return file.Open(flags)
 		}
-		return file.Open(flags)
 	}
 
 	node, err := vfs.Stat(name)

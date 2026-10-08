@@ -893,25 +893,12 @@ func (d *Dir) stat(leaf string) (Node, error) {
 		}
 	}
 
-	ci := fs.GetConfig(d.vfs.ctx)
-	normUnicode := !ci.NoUnicodeNormalization
-	normCase := ci.IgnoreCaseSync || d.vfs.Opt.CaseInsensitive
-	if !ok && (normUnicode || normCase) {
-		leafNormalized := operations.ToNormal(leaf, normUnicode, normCase) // this handles both case and unicode normalization
-		d.mu.Lock()
-		for name, node := range d.items {
-			if operations.ToNormal(name, normUnicode, normCase) == leafNormalized {
-				if ok {
-					// duplicate normalized match is an error
-					d.mu.Unlock()
-					return nil, fmt.Errorf("duplicate filename %q detected with case/unicode normalization settings", leaf)
-				}
-				// found a normalized match
-				ok = true
-				item = node
-			}
+	if !ok {
+		var err error
+		item, ok, err = d.statCachedNormalized(leaf)
+		if err != nil {
+			return nil, err
 		}
-		d.mu.Unlock()
 	}
 
 	if !ok {
@@ -921,6 +908,35 @@ func (d *Dir) stat(leaf string) (Node, error) {
 		return nil, ENOENT
 	}
 	return item, nil
+}
+
+// statCachedNormalized looks for leaf among the cached items using the
+// unicode and case normalisation settings, without asking the remote.
+//
+// It returns an error if more than one cached name matches. It takes d.mu
+// itself, so it must be called without it held.
+func (d *Dir) statCachedNormalized(leaf string) (item Node, ok bool, err error) {
+	ci := fs.GetConfig(d.vfs.ctx)
+	normUnicode := !ci.NoUnicodeNormalization
+	normCase := ci.IgnoreCaseSync || d.vfs.Opt.CaseInsensitive
+	if !normUnicode && !normCase {
+		return nil, false, nil
+	}
+	leafNormalized := operations.ToNormal(leaf, normUnicode, normCase) // this handles both case and unicode normalization
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for name, node := range d.items {
+		if operations.ToNormal(name, normUnicode, normCase) == leafNormalized {
+			if ok {
+				// duplicate normalized match is an error
+				return nil, false, fmt.Errorf("duplicate filename %q detected with case/unicode normalization settings", leaf)
+			}
+			// found a normalized match
+			ok = true
+			item = node
+		}
+	}
+	return item, ok, nil
 }
 
 // Check to see if a directory is empty
