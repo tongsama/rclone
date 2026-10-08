@@ -250,3 +250,21 @@ func TestKazBucketStatErrorsElsewhereAreNot404(t *testing.T) {
 		})
 	}
 }
+
+// TestKazKeyStatErrorIsNot404 checks that in lookup mode a remote failure while
+// resolving a key is not reported as NoSuchKey when the bucket itself is cached.
+func TestKazKeyStatErrorIsNot404(t *testing.T) {
+	ctx := context.Background()
+	b, ff, _ := newKazBackend(t, true, nil)
+
+	_, err := b.HeadObject(ctx, "bucket", "obj-missing")
+	require.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey), "missing key: %v", err)
+
+	// The bucket is served from cache; only the key lookup reaches the remote.
+	ff.fail.Store(true)
+	defer ff.fail.Store(false)
+	_, err = b.HeadObject(ctx, "bucket", "other")
+	assert.ErrorIs(t, err, errKaz, "HEAD")
+	_, err = b.GetObject(ctx, "bucket", "other", nil)
+	assert.ErrorIs(t, err, errKaz, "GET")
+}
