@@ -4,6 +4,7 @@ package s3
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"maps"
 	"math"
@@ -279,7 +280,7 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return nil, gofakes3.BucketNotFound(bucketName)
+		return nil, bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -288,7 +289,7 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 	}
 	node, err := _vfs.Stat(fp)
 	if err != nil {
-		return nil, gofakes3.KeyNotFound(objectName)
+		return nil, keyStatError(objectName, err)
 	}
 
 	if !node.IsFile() {
@@ -336,7 +337,7 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return nil, gofakes3.BucketNotFound(bucketName)
+		return nil, bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -345,7 +346,7 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 	}
 	node, err := _vfs.Stat(fp)
 	if err != nil {
-		return nil, gofakes3.KeyNotFound(objectName)
+		return nil, keyStatError(objectName, err)
 	}
 
 	if !node.IsFile() {
@@ -569,7 +570,7 @@ func (b *s3Backend) deleteObject(ctx context.Context, bucketName, objectName str
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return gofakes3.BucketNotFound(bucketName)
+		return bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -635,7 +636,11 @@ func (b *s3Backend) BucketExists(ctx context.Context, name string) (exists bool,
 	}
 	_, err = _vfs.Stat(name)
 	if err != nil {
-		return false, nil
+		if errors.Is(err, vfs.ENOENT) {
+			return false, nil
+		}
+		// Not knowing is not "absent": report the failure (500).
+		return false, err
 	}
 
 	return true, nil
