@@ -38,6 +38,10 @@ type Dir struct {
 	items   map[string]Node   // directory entries - can be empty but not nil
 	virtual map[string]vState // virtual directory entries - may be nil
 
+	// lookupArmed is true while cleanupTimer is scheduled for entries added by
+	// a kaz lookup (--kaz-vfs-lookup-by-path). Protected by mu.
+	lookupArmed bool
+
 	modTimeMu sync.Mutex // protects the following
 	modTime   time.Time
 
@@ -860,10 +864,14 @@ func (d *Dir) statMetadata(leaf, baseLeaf string) (metaNode Node, err error) {
 // contains files with names that differ only by case.
 func (d *Dir) stat(leaf string) (Node, error) {
 	d.mu.Lock()
-	err := d._readDir()
-	if err != nil {
-		d.mu.Unlock()
-		return nil, err
+	// In kaz lookup mode the directory is never listed to answer a Stat: a
+	// cached entry is used as is and a missing one is looked up directly.
+	if !d.vfs.Opt.KazLookupByPath {
+		err := d._readDir()
+		if err != nil {
+			d.mu.Unlock()
+			return nil, err
+		}
 	}
 	item, ok := d.items[leaf]
 	d.mu.Unlock()
@@ -903,6 +911,9 @@ func (d *Dir) stat(leaf string) (Node, error) {
 	}
 
 	if !ok {
+		if d.vfs.Opt.KazLookupByPath {
+			return d.lookup(leaf)
+		}
 		return nil, ENOENT
 	}
 	return item, nil
