@@ -57,7 +57,15 @@ func (d *Dir) lookup(leaf string) (Node, error) {
 	return node, nil
 }
 
-// _armLookupCleanup schedules the cache cleanup for entries added by lookup.
-// It is filled in by the cache lifetime task. Must be called with d.mu held.
+// _armLookupCleanup schedules the directory cache cleanup after the first
+// lookup hit since the last cleanup, so entries added by lookup expire after
+// at most DirCacheTime*2. Arming only once per cleanup keeps a busy
+// directory from postponing its cleanup forever, and a Dir dropped from its
+// parent is not re-armed. Must be called with d.mu held.
 func (d *Dir) _armLookupCleanup() {
+	if d.lookupArmed {
+		return
+	}
+	d.lookupArmed = true
+	d.cleanupTimer.Reset(time.Duration(d.vfs.Opt.DirCacheTime * 2))
 }

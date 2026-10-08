@@ -88,6 +88,8 @@ func (d *Dir) cacheCleanup() {
 
 	d.mu.Lock()
 	_, stale := d._age(when)
+	// The timer has fired; the next lookup hit arms it again.
+	d.lookupArmed = false
 	d.mu.Unlock()
 
 	if stale {
@@ -244,6 +246,8 @@ func (d *Dir) ForgetAll() (hasVirtual bool) {
 		d.read = time.Time{}
 		d.items = make(map[string]Node)
 		d.cleanupTimer.Stop()
+		// The timer is stopped; let the next lookup hit arm it again.
+		d.lookupArmed = false
 	} else {
 		d.cleanupTimer.Reset(time.Duration(d.vfs.Opt.DirCacheTime * 2))
 	}
