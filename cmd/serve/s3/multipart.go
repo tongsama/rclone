@@ -180,6 +180,22 @@ func (b *s3Backend) CreateMultipartUpload(ctx context.Context, bucketName, objec
 	if err != nil {
 		return "", err
 	}
+	if b.s.opt.KazPersistMetadata {
+		// The metadata travels with the upload, so it must be set before
+		// the first write.
+		if err := kazSetUploadMetadata(fh, meta); err != nil {
+			// Abandon the upload instead of committing an empty object.
+			if aborter, ok := fh.(interface{ CloseWithError(error) error }); ok {
+				_ = aborter.CloseWithError(err)
+			} else {
+				_ = fh.Close()
+			}
+			if streamFp != fp {
+				_ = _vfs.Remove(streamFp)
+			}
+			return "", err
+		}
+	}
 	up.fh = fh
 	up.vfs = _vfs
 
@@ -416,7 +432,9 @@ func (b *s3Backend) CompleteMultipartUpload(ctx context.Context, bucketName, obj
 	}
 	b.multipartUploads.Delete(uploadID)
 
-	b.meta.Store(up.fp, up.meta)
+	if !b.s.opt.KazPersistMetadata {
+		b.meta.Store(up.fp, up.meta)
+	}
 	if val, ok := up.meta["X-Amz-Meta-Mtime"]; ok {
 		if ti, err := swift.FloatStringToTime(val); err == nil {
 			b.storeModtime(up.fp, up.meta, val)

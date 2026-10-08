@@ -42,6 +42,16 @@ type Server struct {
 
 // Make a new S3 Server to serve the remote
 func newServer(ctx context.Context, f fs.Fs, opt *Options, vfsOpt *vfscommon.Options, proxyOpt *proxy.Options) (s *Server, err error) {
+	if opt.KazPersistMetadata {
+		vo := vfscommon.Opt
+		if vfsOpt != nil {
+			vo = *vfsOpt
+		}
+		if vo.CacheMode != vfscommon.CacheModeOff {
+			// Cached uploads are written back later without the metadata.
+			return nil, errors.New("--kaz-s3-persist-metadata needs --vfs-cache-mode off")
+		}
+	}
 	w := &Server{
 		f:            f,
 		ctx:          ctx,

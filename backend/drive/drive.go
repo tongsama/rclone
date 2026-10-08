@@ -786,6 +786,22 @@ See: https://developers.google.com/workspace/drive/api/guides/limited-expansive-
 				Value: "true",
 				Help:  "Get GCP IAM credentials from the environment (env vars or IAM).",
 			}},
+		}, {
+			Name: "kaz_properties",
+			Help: `[kaz] Read and keep the user properties of files without --metadata.
+
+Properties are fetched with listings, lookups and uploads at no extra API
+cost and returned as the object's metadata.
+
+Whenever an upload is made with --metadata (including
+"rclone serve s3 --kaz-s3-persist-metadata", and e.g. "rclone copy -M"
+against a remote with this set), the file's existing properties are
+replaced by the source's metadata: properties the source does not have
+are deleted, all of them if the source has no metadata.
+
+Required by "rclone serve s3 --kaz-s3-persist-metadata".`,
+			Default:  false,
+			Advanced: true,
 		}}...),
 	})
 
@@ -849,6 +865,7 @@ type Options struct {
 	EnforceExpansiveAccess    bool                 `config:"metadata_enforce_expansive_access"`
 	Enc                       encoder.MultiEncoder `config:"encoding"`
 	EnvAuth                   bool                 `config:"env_auth"`
+	KazProperties             bool                 `config:"kaz_properties"`
 }
 
 // Fs represents a remote drive server
@@ -887,6 +904,8 @@ type baseObject struct {
 	parents      []string     // IDs of the parent directories
 	resourceKey  *string      // resourceKey is needed for link shared objects
 	metadata     *fs.Metadata // metadata if known
+
+	kazProperties map[string]string // user properties when kaz_properties is set
 }
 type documentObject struct {
 	baseObject
@@ -1551,8 +1570,13 @@ func (f *Fs) newBaseObject(ctx context.Context, remote string, info *drive.File)
 		parents:      info.Parents,
 	}
 	err = nil
+	if f.opt.KazProperties {
+		o.kazProperties = info.Properties
+	}
 	if fs.GetConfig(ctx).Metadata {
 		err = o.parseMetadata(ctx, info)
+	} else if f.opt.KazProperties {
+		o.metadata = kazUserMetadata(info)
 	}
 	return o, err
 }
@@ -1574,6 +1598,8 @@ func (f *Fs) getFileFields(ctx context.Context) (fields googleapi.Field) {
 	}
 	if fs.GetConfig(ctx).Metadata {
 		fields += "," + metadataFields
+	} else if f.opt.KazProperties {
+		fields += ",properties"
 	}
 	return fields
 }
@@ -2590,7 +2616,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		err = f.pacer.CallNoRetry(func() (bool, error) {
 			info, err = f.svc.Files.Create(createInfo).
 				Media(in, googleapi.ContentType(srcMimeType), googleapi.ChunkSize(0)).
-				Fields(partialFields).
+				Fields(googleapi.Field(f.kazUploadFields())).
 				SupportsAllDrives(true).
 				KeepRevisionForever(f.opt.KeepRevisionForever).
 				Context(ctx).Do()
@@ -4503,7 +4529,7 @@ func (o *baseObject) update(ctx context.Context, updateInfo *drive.File, uploadM
 		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 			info, err = o.fs.svc.Files.Update(actualID(o.id), updateInfo).
 				Media(in, googleapi.ContentType(uploadMimeType), googleapi.ChunkSize(0)).
-				Fields(partialFields).
+				Fields(googleapi.Field(o.fs.kazUploadFields())).
 				SupportsAllDrives(true).
 				KeepRevisionForever(o.fs.opt.KeepRevisionForever).
 				Context(ctx).Do()
@@ -4550,6 +4576,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	updateMetadata, err := o.fs.fetchAndUpdateMetadata(ctx, src, options, updateInfo, true)
 	if err != nil {
 		return err
+	}
+	if o.fs.opt.KazProperties && fs.GetConfig(ctx).Metadata {
+		// Replace the user properties as a whole, as an S3 PUT does.
+		kazNullStaleProperties(updateInfo, o.kazProperties)
 	}
 
 	info, err := o.baseObject.update(ctx, updateInfo, srcMimeType, in, src)
