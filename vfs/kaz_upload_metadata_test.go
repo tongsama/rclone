@@ -17,7 +17,7 @@ import (
 // for user metadata.
 func requireUserXattrs(t *testing.T, r *fstest.Run) {
 	t.Helper()
-	if r.Fremote.Features().UserMetadata == false {
+	if !r.Fremote.Features().UserMetadata {
 		t.Skip("remote has no user metadata support")
 	}
 	ctx := context.Background()
