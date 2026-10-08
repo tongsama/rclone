@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/text/unicode/norm"
 )
 
 // countingFs wraps an fs.Fs to count directory listings and NewObject calls
@@ -48,9 +50,15 @@ func (c *countingFs) NewObject(ctx context.Context, remote string) (fs.Object, e
 // the kaz lookup mode set to lookup and the given dir cache time. Writes made
 // with r.WriteObject act as another client sharing the remote.
 func newLookupVFS(t *testing.T, lookup bool, dirCacheTime time.Duration) (*fstest.Run, *countingFs, *VFS) {
+	return newLookupVFSMode(t, lookup, dirCacheTime, vfscommon.CacheModeOff)
+}
+
+// newLookupVFSMode is newLookupVFS with the given VFS cache mode.
+func newLookupVFSMode(t *testing.T, lookup bool, dirCacheTime time.Duration, mode vfscommon.CacheMode) (*fstest.Run, *countingFs, *VFS) {
 	r := fstest.NewRun(t)
 	cf := &countingFs{Fs: r.Fremote}
 	opt := vfscommon.Opt
+	opt.CacheMode = mode
 	opt.KazLookupByPath = lookup
 	opt.DirCacheTime = fs.Duration(dirCacheTime)
 	opt.PollInterval = 0
@@ -381,4 +389,80 @@ func TestKazCreateTruncOptionOff(t *testing.T) {
 	_, err = fd.Write([]byte("xyz"))
 	require.NoError(t, err)
 	require.NoError(t, fd.Close())
+}
+
+// TestKazCreateTruncReusesNormalizedName checks an O_TRUNC create reuses a
+// cached node whose name differs only by unicode normalisation.
+func TestKazCreateTruncReusesNormalizedName(t *testing.T) {
+	r, _, v := newLookupVFS(t, true, time.Hour)
+	ctx := context.Background()
+	nfd := norm.NFD.String("café")
+	nfc := norm.NFC.String("café")
+	require.NotEqual(t, nfd, nfc)
+	r.WriteObject(ctx, "dir/"+nfd, "old", t1)
+	_, err := v.Stat("dir/" + nfd)
+	require.NoError(t, err)
+
+	fd, err := v.OpenFile("dir/"+nfc, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	require.NoError(t, err)
+	_, err = fd.Write([]byte("new data"))
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+
+	entries, err := r.Fremote.List(ctx, "dir")
+	require.NoError(t, err)
+	count := 0
+	for _, e := range entries {
+		if norm.NFC.String(path.Base(e.Remote())) == nfc {
+			count++
+			o := e.(fs.Object)
+			assert.Equal(t, int64(8), o.Size())
+		}
+	}
+	assert.Equal(t, 1, count)
+}
+
+// TestKazStatCachedNormalizedDuplicate checks two cached names that
+// normalise equal give the duplicate filename error.
+func TestKazStatCachedNormalizedDuplicate(t *testing.T) {
+	_, _, v := newLookupVFS(t, true, time.Hour)
+	root, err := v.Root()
+	require.NoError(t, err)
+	nfd := norm.NFD.String("café")
+	nfc := norm.NFC.String("café")
+	root.mu.Lock()
+	root.items[nfd] = newFile(root, "", nil, nfd)
+	root.items[nfc] = newFile(root, "", nil, nfc)
+	root.mu.Unlock()
+	_, ok, err := root.statCachedNormalized(nfc + "")
+	assert.Error(t, err)
+	assert.False(t, ok)
+	assert.Contains(t, err.Error(), "duplicate filename")
+}
+
+// TestKazCreateTruncCacheModeStillLooksUp checks the lookup-free create is
+// not used with a VFS cache, where a failed save would only show later.
+func TestKazCreateTruncCacheModeStillLooksUp(t *testing.T) {
+	r, cf, v := newLookupVFSMode(t, true, time.Hour, vfscommon.CacheModeWrites)
+	r.WriteObject(context.Background(), "dir/a", "aaa", t1)
+	_, err := v.Stat("dir")
+	require.NoError(t, err)
+	cf.newObjects.Store(0)
+
+	fd, err := v.OpenFile("dir/new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	require.NoError(t, err)
+	assert.Greater(t, cf.newObjects.Load(), int64(0))
+	_ = fd.Close()
+}
+
+// TestKazCreateTruncOnCachedDirIsEEXIST checks an O_TRUNC create of a name
+// cached as a directory fails with EEXIST.
+func TestKazCreateTruncOnCachedDirIsEEXIST(t *testing.T) {
+	r, _, v := newLookupVFS(t, true, time.Hour)
+	r.WriteObject(context.Background(), "dir/sub/x", "x", t1)
+	_, err := v.Stat("dir/sub")
+	require.NoError(t, err)
+
+	_, err = v.OpenFile("dir/sub", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	assert.True(t, errors.Is(err, EEXIST), "got %v", err)
 }

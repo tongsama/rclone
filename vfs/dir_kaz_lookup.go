@@ -87,6 +87,14 @@ func (d *Dir) kazCreateNoLookup(name string) (*File, error) {
 	d.mu.RLock()
 	node, ok := d.items[name]
 	d.mu.RUnlock()
+	if !ok {
+		// Same local normalised match as Dir.stat, still without the remote.
+		var err error
+		node, ok, err = d.statCachedNormalized(name)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if ok {
 		if file, isFile := node.(*File); isFile {
 			return file, nil
