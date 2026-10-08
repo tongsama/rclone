@@ -791,9 +791,15 @@ See: https://developers.google.com/workspace/drive/api/guides/limited-expansive-
 			Help: `[kaz] Read and keep the user properties of files without --metadata.
 
 Properties are fetched with listings, lookups and uploads at no extra API
-cost and returned as the object's metadata. When an upload is made with
-metadata, existing properties missing from it are deleted so the
-properties match the new upload (as an S3 PUT replaces user metadata).`,
+cost and returned as the object's metadata.
+
+Whenever an upload is made with --metadata (including
+"rclone serve s3 --kaz-s3-persist-metadata", and e.g. "rclone copy -M"
+against a remote with this set), the file's existing properties are
+replaced by the source's metadata: properties the source does not have
+are deleted, all of them if the source has no metadata.
+
+Required by "rclone serve s3 --kaz-s3-persist-metadata".`,
 			Default:  false,
 			Advanced: true,
 		}}...),
