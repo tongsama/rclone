@@ -41,6 +41,13 @@ func (d *Dir) lookup(leaf string) (Node, error) {
 	}
 
 	d.mu.Lock()
+	if d.path != dirPath {
+		// The directory was renamed while the remote call was in flight, so
+		// the result belongs to the old path. Look up again under the new
+		// one, with no lock held.
+		d.mu.Unlock()
+		return d.lookup(leaf)
+	}
 	defer d.mu.Unlock()
 	if node, ok := d.items[leaf]; ok {
 		// Another lookup, a listing or a create got there first.
