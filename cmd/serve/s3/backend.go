@@ -132,7 +132,8 @@ func formatHeaderTime(t time.Time) string {
 
 // HeadObject returns the fileinfo for the given object name.
 //
-// Note that the metadata is not supported yet.
+// User metadata comes from memory, or from the object itself with
+// --kaz-s3-persist-metadata.
 func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName string) (*gofakes3.Object, error) {
 	_vfs, err := b.s.getVFS(ctx)
 	if err != nil {

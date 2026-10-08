@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,10 +248,34 @@ func TestKazPersistFailedPutKeepsOld(t *testing.T) {
 	require.Error(t, err)
 	obj, err := newKazPersistBackend(t, root, time.Hour+time.Second).GetObject(ctx, "bucket", "k", nil)
 	require.NoError(t, err)
-	data, _ := io.ReadAll(obj.Contents)
+	data, err := io.ReadAll(obj.Contents)
+	require.NoError(t, err)
 	_ = obj.Contents.Close()
 	assert.Equal(t, "one", string(data))
 	assert.Equal(t, "1", obj.Metadata["X-Amz-Meta-Crc32c"])
+}
+
+// TestKazPersistMtime checks X-Amz-Meta-Mtime is stored as user metadata
+// like any other key and does not change the object's modification time
+// seen through another host.
+func TestKazPersistMtime(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	kazRequireXattrs(t, root)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "bucket"), 0777))
+	a := newKazPersistBackend(t, root, time.Hour)
+	_, err := a.PutObject(ctx, "bucket", "k", map[string]string{"X-Amz-Meta-Mtime": "1700000000.5", "X-Amz-Meta-Crc32c": "3"}, strings.NewReader("abc"), 3)
+	require.NoError(t, err)
+	obj, err := newKazPersistBackend(t, root, time.Hour+time.Second).HeadObject(ctx, "bucket", "k")
+	require.NoError(t, err)
+	assert.Equal(t, "3", obj.Metadata["X-Amz-Meta-Crc32c"])
+	assert.Equal(t, "1700000000.5", obj.Metadata["X-Amz-Meta-Mtime"])
+	mt, err := http.ParseTime(obj.Metadata["Last-Modified"])
+	require.NoError(t, err)
+	assert.True(t, time.Unix(1700000000, 0).Equal(mt), "modtime %v", mt)
+	n := 0
+	a.meta.Range(func(any, any) bool { n++; return true })
+	assert.Zero(t, n, "b.meta must stay empty")
 }
 
 // TestKazPersistMultipart checks metadata given when a multipart upload is

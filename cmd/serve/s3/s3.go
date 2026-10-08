@@ -52,7 +52,7 @@ var OptionsInfo = fs.Options{{
 }, {
 	Name:    "kaz_s3_persist_metadata",
 	Default: false,
-	Help:    "[kaz] Store X-Amz-Meta-* user metadata with the object in the backend (as s3m-* metadata) instead of in memory. Needs --vfs-cache-mode off; use --drive-kaz-properties on drive",
+	Help:    "[kaz] Store X-Amz-Meta-* user metadata with the object in the backend (as s3m-* metadata) instead of in memory. Needs --vfs-cache-mode off. On drive --drive-kaz-properties is required, otherwise metadata of objects uploaded by this server is missing until they are listed again and stale metadata survives overwrites",
 	Groups:  "Kaz",
 }}.
 	Add(httplib.ConfigInfo).
