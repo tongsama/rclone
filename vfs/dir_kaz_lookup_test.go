@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -182,9 +183,10 @@ func dirItemCount(d *Dir) int {
 // about twice the dir cache time, and that this repeats on the same Dir after
 // a cleanup, so a deletion by another client is eventually seen.
 //
-// It uses the root directory because the root Dir is never replaced: its
-// first expiry comes from the timer set when the Dir is created, so only the
-// second round shows the timer is armed again by a lookup.
+// It uses the root directory because the root Dir is never replaced. Both
+// rounds are armed by the lookup; the timer set when the Dir is created only
+// explains why round 0 would also pass without arming, so round 1 is the one
+// that proves the timer is armed again.
 func TestKazLookupEntriesExpire(t *testing.T) {
 	r, _, v := newLookupVFS(t, true, 200*time.Millisecond)
 	ctx := context.Background()
@@ -224,4 +226,68 @@ func TestKazRemoveAlreadyGone(t *testing.T) {
 	require.NoError(t, v.Remove("dir/a"))
 	_, err = v.Stat("dir/a")
 	assert.True(t, errors.Is(err, ENOENT))
+}
+
+// TestKazLookupErrorAtLeaf checks a remote error while resolving the last path
+// element is returned as is and leaves nothing cached under that name.
+func TestKazLookupErrorAtLeaf(t *testing.T) {
+	r, cf, v := newLookupVFS(t, true, time.Hour)
+	r.WriteObject(context.Background(), "dir/a", "aaa", t1)
+	node, err := v.Stat("dir/a")
+	require.NoError(t, err)
+	require.True(t, node.IsFile())
+	dirNode, err := v.Stat("dir")
+	require.NoError(t, err)
+	dir := dirNode.(*Dir)
+
+	cf.newObjectErr = errKazBoom
+	_, err = v.Stat("dir/x")
+	cf.newObjectErr = nil
+	assert.True(t, errors.Is(err, errKazBoom), "got %v", err)
+	assert.False(t, errors.Is(err, ENOENT))
+	assert.Equal(t, 1, dirItemCount(dir), "failed lookup must not be cached")
+}
+
+// TestKazLookupBusyDirExpires checks lookups arriving more often than the
+// expiry do not postpone the cleanup: entries still get dropped while the
+// directory stays busy.
+func TestKazLookupBusyDirExpires(t *testing.T) {
+	r, _, v := newLookupVFS(t, true, 200*time.Millisecond)
+	ctx := context.Background()
+	const n = 15
+	for i := range n {
+		r.WriteObject(ctx, fmt.Sprintf("n%02d", i), "x", t1)
+	}
+	root, err := v.Root()
+	require.NoError(t, err)
+
+	dropped := false
+	for i := range n {
+		_, err := v.Stat(fmt.Sprintf("n%02d", i))
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+		if dirItemCount(root) < i+1 {
+			dropped = true
+		}
+	}
+	assert.True(t, dropped, "a cleanup must run although lookups keep arriving")
+}
+
+// TestKazRemoveKeepsErrorWhenUnsure checks Remove keeps the backend error when
+// the follow-up check cannot confirm the object is gone.
+func TestKazRemoveKeepsErrorWhenUnsure(t *testing.T) {
+	r, cf, v := newLookupVFS(t, true, time.Hour)
+	ctx := context.Background()
+	obj := r.WriteObject(ctx, "dir/a", "aaa", t1)
+	_, err := v.Stat("dir/a")
+	require.NoError(t, err)
+
+	o, err := r.Fremote.NewObject(ctx, obj.Path)
+	require.NoError(t, err)
+	require.NoError(t, o.Remove(ctx))
+
+	cf.newObjectErr = errKazBoom
+	err = v.Remove("dir/a")
+	cf.newObjectErr = nil
+	assert.Error(t, err)
 }
