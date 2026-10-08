@@ -170,3 +170,40 @@ func TestKazLookupConcurrent(t *testing.T) {
 		assert.Same(t, again, nodes[i])
 	}
 }
+
+// dirItemCount returns how many entries dir currently caches.
+func dirItemCount(d *Dir) int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return len(d.items)
+}
+
+// TestKazLookupEntriesExpire checks entries added by lookup are dropped after
+// about twice the dir cache time, and that this repeats on the same Dir after
+// a cleanup, so a deletion by another client is eventually seen.
+//
+// It uses the root directory because the root Dir is never replaced: its
+// first expiry comes from the timer set when the Dir is created, so only the
+// second round shows the timer is armed again by a lookup.
+func TestKazLookupEntriesExpire(t *testing.T) {
+	r, _, v := newLookupVFS(t, true, 200*time.Millisecond)
+	ctx := context.Background()
+	obj := r.WriteObject(ctx, "a", "aaa", t1)
+	root, err := v.Root()
+	require.NoError(t, err)
+
+	for round := range 2 {
+		_, err = v.Stat("a")
+		require.NoError(t, err, "round %d", round)
+		require.Equal(t, 1, dirItemCount(root), "round %d", round)
+		require.Eventually(t, func() bool { return dirItemCount(root) == 0 },
+			3*time.Second, 20*time.Millisecond, "round %d: lookup entry must expire", round)
+	}
+
+	// Removed by another client: once expired the lookup reports not found.
+	o, err := r.Fremote.NewObject(ctx, obj.Path)
+	require.NoError(t, err)
+	require.NoError(t, o.Remove(ctx))
+	_, err = v.Stat("a")
+	assert.True(t, errors.Is(err, ENOENT))
+}
