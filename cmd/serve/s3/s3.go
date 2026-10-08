@@ -61,6 +61,11 @@ var OptionsInfo = fs.Options{{
 	Name:    "multipart_expiry",
 	Default: fs.Duration(24 * time.Hour),
 	Help:    "Abort incomplete multipart uploads idle for longer than this, 0 to keep forever",
+}, {
+	Name:    "kaz_s3_persist_metadata",
+	Default: false,
+	Help:    "[kaz] Store X-Amz-Meta-* user metadata with the object in the backend (as s3m-* metadata) instead of in memory. Needs --vfs-cache-mode off; use --drive-kaz-properties on drive",
+	Groups:  "Kaz",
 }}.
 	Add(httplib.ConfigInfo).
 	Add(httplib.AuthConfigInfo)
@@ -78,6 +83,7 @@ type Options struct {
 	MultipartMaxUploads           int           `config:"multipart_max_uploads"`
 	MetadataMaxObjects            int           `config:"metadata_max_objects"`
 	MultipartExpiry               fs.Duration   `config:"multipart_expiry"`
+	KazPersistMetadata            bool          `config:"kaz_s3_persist_metadata"`
 	Auth                          httplib.AuthConfig
 	HTTP                          httplib.Config
 }
