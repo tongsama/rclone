@@ -575,6 +575,19 @@ func (vfs *VFS) OpenFile(name string, flags int, perm os.FileMode) (fd Handle, e
 		return nil, EINVAL
 	}
 
+	if vfs.Opt.KazLookupByPath && flags&os.O_CREATE != 0 && flags&os.O_TRUNC != 0 && flags&os.O_EXCL == 0 {
+		// Truncating makes existence irrelevant, so avoid remote lookups.
+		dir, leaf, err := vfs.StatParent(name)
+		if err != nil {
+			return nil, err
+		}
+		file, err := dir.kazCreateNoLookup(leaf)
+		if err != nil {
+			return nil, err
+		}
+		return file.Open(flags)
+	}
+
 	node, err := vfs.Stat(name)
 	if err != nil {
 		if err != ENOENT || flags&os.O_CREATE == 0 {
