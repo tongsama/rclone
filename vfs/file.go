@@ -683,6 +683,10 @@ func (f *File) Remove() (err error) {
 			// Ignore error deleting file if was writing it as it may not be uploaded yet
 			err = nil
 			fs.Debugf(f._path(), "Ignoring File.Remove file error as uploading: %v", err)
+		} else if d.vfs.Opt.KazLookupByPath && f.kazObjectGone(d) {
+			// Another client sharing the remote removed it first.
+			fs.Debugf(f._path(), "File.Remove: object already gone, treating as removed: %v", err)
+			err = nil
 		} else {
 			fs.Debugf(f._path(), "File.Remove file error: %v", err)
 		}
@@ -694,6 +698,16 @@ func (f *File) Remove() (err error) {
 		d.delObject(f.Name())
 	}
 	return err
+}
+
+// kazObjectGone reports whether the remote no longer has this file's object.
+// It is used in kaz lookup mode to treat a failed remove as done when another
+// client sharing the remote deleted the object first. Errors other than
+// "object not found" (e.g. rate limits) report false so the original remove
+// error is kept.
+func (f *File) kazObjectGone(d *Dir) bool {
+	_, err := d.f.NewObject(f.ctx, f.Path())
+	return errors.Is(err, fs.ErrorObjectNotFound)
 }
 
 // RemoveAll the file - same as remove for files
