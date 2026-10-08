@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ncw/swift/v2"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/vfs"
 )
@@ -81,4 +82,44 @@ func kazObjectUserMetadata(ctx context.Context, node vfs.Node) (map[string]strin
 		return nil, err
 	}
 	return kazFromProperties(m), nil
+}
+
+// kazStoreMeta stores meta for the object at fp like tenant.storeMeta, except
+// that with --kaz-s3-persist-metadata the metadata already travelled with the
+// upload, so only the modification time is applied and nothing is kept in
+// memory.
+func (b *s3Backend) kazStoreMeta(t *tenant, v *vfs.VFS, fp string, meta map[string]string) error {
+	if !b.s.opt.KazPersistMetadata {
+		return t.storeMeta(v, fp, meta)
+	}
+	return kazApplyModtime(v, fp, meta)
+}
+
+// kazApplyModtime sets the modification time of the object at fp from
+// "X-Amz-Meta-Mtime" or "mtime" in meta, as tenant.storeMeta does.
+func kazApplyModtime(v *vfs.VFS, fp string, meta map[string]string) error {
+	for _, key := range []string{"X-Amz-Meta-Mtime", "mtime"} {
+		val, ok := meta[key]
+		if !ok {
+			continue
+		}
+		ti, err := swift.FloatStringToTime(val)
+		if err != nil {
+			continue
+		}
+		return v.Chtimes(fp, ti, ti)
+	}
+	return nil
+}
+
+// kazUserMeta returns the user metadata of node, the object at fp: from the
+// object itself with --kaz-s3-persist-metadata, otherwise what this user
+// stored in memory (tenant.getMeta).
+func (b *s3Backend) kazUserMeta(ctx context.Context, fp string, node vfs.Node) (map[string]string, bool, error) {
+	if b.s.opt.KazPersistMetadata {
+		user, err := kazObjectUserMetadata(ctx, node)
+		return user, err == nil, err
+	}
+	meta, ok := b.tenant(ctx).getMeta(ctx, fp, node)
+	return meta, ok, nil
 }

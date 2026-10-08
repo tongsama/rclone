@@ -316,7 +316,11 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 		"Content-Type":  mimeType,
 	}
 
-	if metaMap, ok := b.tenant(ctx).getMeta(ctx, fp, node); ok {
+	metaMap, ok, err := b.kazUserMeta(ctx, fp, node)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		maps.Copy(meta, metaMap)
 	}
 
@@ -396,7 +400,11 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 		"Content-Type":  mimeType,
 	}
 
-	if metaMap, ok := b.tenant(ctx).getMeta(ctx, fp, node); ok {
+	metaMap, ok, err := b.kazUserMeta(ctx, fp, node)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		maps.Copy(meta, metaMap)
 	}
 
@@ -433,7 +441,7 @@ func (b *s3Backend) TouchObject(ctx context.Context, fp string, meta map[string]
 		return result, err
 	}
 
-	return result, b.tenant(ctx).storeMeta(_vfs, fp, meta)
+	return result, b.kazStoreMeta(b.tenant(ctx), _vfs, fp, meta)
 }
 
 // PutObject creates or overwrites the object with the given name.
@@ -498,6 +506,22 @@ func (b *s3Backend) PutObject(
 		return result, err
 	}
 
+	if b.s.opt.KazPersistMetadata {
+		// The metadata travels with the upload, so it must be set before
+		// the first write.
+		if err := kazSetUploadMetadata(f, meta); err != nil {
+			// Abandon the upload: a plain Close would commit an empty
+			// object over whatever is stored at the key.
+			if aborter, ok := f.(interface{ CloseWithError(error) error }); ok {
+				_ = aborter.CloseWithError(err)
+			} else {
+				_ = f.Close()
+			}
+			cleanup()
+			return result, err
+		}
+	}
+
 	n, err := io.Copy(f, input)
 	if err == nil && size >= 0 && n != size {
 		// The body ended cleanly but short of its declared size
@@ -534,7 +558,7 @@ func (b *s3Backend) PutObject(
 		return result, err
 	}
 
-	return result, b.tenant(ctx).storeMeta(_vfs, fp, meta)
+	return result, b.kazStoreMeta(b.tenant(ctx), _vfs, fp, meta)
 }
 
 // DeleteMulti deletes multiple objects in a single request.
@@ -667,6 +691,10 @@ func (b *s3Backend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket
 		return result, gofakes3.KeyNotFound(srcKey)
 	}
 	if srcBucket == dstBucket && srcKey == dstKey {
+		if b.s.opt.KazPersistMetadata {
+			// Replacing only the metadata of a stored object is not supported.
+			return result, gofakes3.ErrNotImplemented
+		}
 		return result, b.tenant(ctx).storeMeta(_vfs, fp, meta)
 	}
 

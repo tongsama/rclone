@@ -64,6 +64,8 @@ type multipartUpload struct {
 	vfs    *vfs.VFS       // the VFS fh is created on, used for all later operations
 	tenant *tenant        // the user the upload belongs to
 
+	kazPersistMeta bool // set the metadata on the sink before its first write (--kaz-s3-persist-metadata)
+
 	mu        sync.Mutex
 	changed   chan struct{}  // closed when buffered shrinks, nextPart advances or the upload closes
 	partMD5s  map[int][]byte // raw MD5 sums per part (for the final S3 multipart ETag)
@@ -315,6 +317,7 @@ func (b *s3Backend) CreateMultipartUpload(ctx context.Context, bucketName, objec
 	up := newMultipartUpload(bucketName, objectName, fp, streamFp, meta, int64(b.s.opt.MultipartStreamingBufferLimit))
 	up.budget = t.budget
 	up.vfs = _vfs
+	up.kazPersistMeta = b.s.opt.KazPersistMetadata
 
 	if err := b.addUpload(t, uploadID, up); err != nil {
 		b.releaseUpload(t)
@@ -674,6 +677,28 @@ func (up *multipartUpload) stopStreaming(err error) error {
 	return err
 }
 
+// createSink creates the handle the parts are written to. With
+// --kaz-s3-persist-metadata the metadata travels with the upload, so it is
+// set before the first write. Call with up.mu held.
+func (up *multipartUpload) createSink() (vfs.Handle, error) {
+	fh, err := up.vfs.Create(up.streamFp)
+	if err != nil {
+		return nil, err
+	}
+	if up.kazPersistMeta {
+		if err := kazSetUploadMetadata(fh, up.meta); err != nil {
+			// Abandon the upload instead of committing an empty object.
+			if aborter, ok := fh.(interface{ CloseWithError(error) error }); ok {
+				_ = aborter.CloseWithError(err)
+			} else {
+				_ = fh.Close()
+			}
+			return nil, err
+		}
+	}
+	return fh, nil
+}
+
 // sink returns the handle the parts are written to, creating it on first
 // use. Call with the sink owned (up.pumping).
 func (up *multipartUpload) sink() (io.WriteCloser, error) {
@@ -683,7 +708,7 @@ func (up *multipartUpload) sink() (io.WriteCloser, error) {
 		return nil, gofakes3.ErrNoSuchUpload
 	}
 	if up.fh == nil {
-		fh, err := up.vfs.Create(up.streamFp)
+		fh, err := up.createSink()
 		if err != nil {
 			return nil, err
 		}
@@ -902,7 +927,7 @@ func (b *s3Backend) CompleteMultipartUpload(ctx context.Context, bucketName, obj
 	}
 	b.deleteUpload(uploadID, up)
 
-	_ = up.tenant.storeMeta(up.vfs, up.fp, up.meta)
+	_ = b.kazStoreMeta(up.tenant, up.vfs, up.fp, up.meta)
 
 	return "", up.multipartETag(input), nil
 }
@@ -1091,7 +1116,7 @@ func (up *multipartUpload) close() error {
 	}
 	if up.fh == nil {
 		// Nothing was streamed so commit an empty object
-		fh, err := up.vfs.Create(up.streamFp)
+		fh, err := up.createSink()
 		if err != nil {
 			up.mu.Unlock()
 			return err
