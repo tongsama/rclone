@@ -176,7 +176,13 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 		"Content-Type":  mimeType,
 	}
 
-	if val, ok := b.meta.Load(fp); ok {
+	if b.s.opt.KazPersistMetadata {
+		user, err := kazObjectUserMetadata(ctx, node)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(meta, user)
+	} else if val, ok := b.meta.Load(fp); ok {
 		metaMap := val.(map[string]string)
 		maps.Copy(meta, metaMap)
 	}
@@ -257,7 +263,13 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 		"Content-Type":  mimeType,
 	}
 
-	if val, ok := b.meta.Load(fp); ok {
+	if b.s.opt.KazPersistMetadata {
+		user, err := kazObjectUserMetadata(ctx, node)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(meta, user)
+	} else if val, ok := b.meta.Load(fp); ok {
 		metaMap := val.(map[string]string)
 		maps.Copy(meta, metaMap)
 	}
@@ -273,8 +285,13 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 }
 
 // storeModtime sets both "mtime" and "X-Amz-Meta-Mtime" to val in b.meta.
-// Call this whenever modtime is updated.
+// Call this whenever modtime is updated. It does nothing with
+// --kaz-s3-persist-metadata, which keeps user metadata with the object.
 func (b *s3Backend) storeModtime(fp string, meta map[string]string, val string) {
+	if b.s.opt.KazPersistMetadata {
+		// User metadata is stored with the object, not in memory.
+		return
+	}
 	meta["X-Amz-Meta-Mtime"] = val
 	meta["mtime"] = val
 	b.meta.Store(fp, meta)
@@ -388,6 +405,22 @@ func (b *s3Backend) PutObject(
 		return result, err
 	}
 
+	if b.s.opt.KazPersistMetadata {
+		// The metadata travels with the upload, so it must be set before
+		// the first write.
+		if err := kazSetUploadMetadata(f, meta); err != nil {
+			// Abandon the upload: a plain Close would commit an empty
+			// object over whatever is stored at the key.
+			if aborter, ok := f.(interface{ CloseWithError(error) error }); ok {
+				_ = aborter.CloseWithError(err)
+			} else {
+				_ = f.Close()
+			}
+			cleanup()
+			return result, err
+		}
+	}
+
 	n, err := io.Copy(f, input)
 	if err == nil && size >= 0 && n != size {
 		// The body ended cleanly but short of its declared size
@@ -424,7 +457,9 @@ func (b *s3Backend) PutObject(
 		return result, err
 	}
 
-	b.meta.Store(fp, meta)
+	if !b.s.opt.KazPersistMetadata {
+		b.meta.Store(fp, meta)
+	}
 
 	if val, ok := meta["X-Amz-Meta-Mtime"]; ok {
 		ti, err := swift.FloatStringToTime(val)
@@ -572,6 +607,10 @@ func (b *s3Backend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket
 		return result, err
 	}
 	if srcBucket == dstBucket && srcKey == dstKey {
+		if b.s.opt.KazPersistMetadata {
+			// Replacing only the metadata of a stored object is not supported.
+			return result, gofakes3.ErrNotImplemented
+		}
 		b.meta.Store(fp, meta)
 
 		val, ok := meta["X-Amz-Meta-Mtime"]
