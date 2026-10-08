@@ -95,7 +95,7 @@ func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofak
 	}
 	_, err = _vfs.Stat(bucket)
 	if err != nil {
-		return nil, gofakes3.BucketNotFound(bucket)
+		return nil, bucketStatError(bucket, err)
 	}
 	if prefix == nil {
 		prefix = emptyPrefix
@@ -342,7 +342,7 @@ func (b *s3Backend) PutObject(
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return result, gofakes3.BucketNotFound(bucketName)
+		return result, bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -492,7 +492,13 @@ func (b *s3Backend) deleteObject(ctx context.Context, bucketName, objectName str
 	if err := _vfs.Remove(fp); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// The user metadata lives only in memory; drop it with the object so it
+	// does not grow without bound.
+	b.meta.Delete(fp)
 
+	if b.s.opt.NoCleanup {
+		return nil
+	}
 	// FIXME: unsafe operation
 	rmdirRecursive(fp, _vfs)
 	return nil
@@ -527,7 +533,7 @@ func (b *s3Backend) DeleteBucket(ctx context.Context, name string) error {
 	}
 	_, err = _vfs.Stat(name)
 	if err != nil {
-		return gofakes3.BucketNotFound(name)
+		return bucketStatError(name, err)
 	}
 
 	if err := _vfs.Remove(name); err != nil {

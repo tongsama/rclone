@@ -3,8 +3,10 @@ package s3
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,6 +108,145 @@ func TestKazStatErrorsAreNot404(t *testing.T) {
 			assert.ErrorIs(t, err, errKaz, "DELETE")
 			_, err = b.BucketExists(ctx, "bucket")
 			assert.ErrorIs(t, err, errKaz, "BucketExists")
+		})
+	}
+}
+
+// TestKazDeleteRemovesMeta checks DELETE drops the in-memory user metadata so
+// it does not grow without bound.
+func TestKazDeleteRemovesMeta(t *testing.T) {
+	ctx := context.Background()
+	b, _, _ := newKazBackend(t, true, nil)
+	_, err := b.PutObject(ctx, "bucket", "d/obj", map[string]string{"X-Amz-Meta-Crc32c": "AAAAAA=="}, strings.NewReader("abc"), 3)
+	require.NoError(t, err)
+	fp, err := bucketObjectPath("bucket", "d/obj")
+	require.NoError(t, err)
+	_, ok := b.meta.Load(fp)
+	require.True(t, ok)
+
+	require.NoError(t, b.deleteObject(ctx, "bucket", "d/obj"))
+	_, ok = b.meta.Load(fp)
+	assert.False(t, ok, "meta must be dropped on delete")
+}
+
+// TestNoCleanupKeepsParents checks --no-cleanup keeps the emptied parent
+// directories and that the default still removes them.
+func TestNoCleanupKeepsParents(t *testing.T) {
+	ctx := context.Background()
+	for _, noCleanup := range []bool{false, true} {
+		b, _, root := newKazBackend(t, true, func(o *Options) { o.NoCleanup = noCleanup })
+		_, err := b.PutObject(ctx, "bucket", "d1/d2/obj", map[string]string{}, strings.NewReader("abc"), 3)
+		require.NoError(t, err)
+		require.NoError(t, b.deleteObject(ctx, "bucket", "d1/d2/obj"))
+		_, statErr := os.Stat(filepath.Join(root, "bucket", "d1", "d2"))
+		if noCleanup {
+			assert.NoError(t, statErr, "--no-cleanup must keep the parent")
+		} else {
+			assert.True(t, os.IsNotExist(statErr), "default must remove the empty parent")
+		}
+	}
+}
+
+// TestKazOtherHostVisible checks objects written and deleted directly on the
+// shared remote (another host) are seen by HEAD, GET and DELETE in lookup
+// mode, even though the directory is already cached.
+func TestKazOtherHostVisible(t *testing.T) {
+	ctx := context.Background()
+	b, _, root := newKazBackend(t, true, nil)
+	dir := filepath.Join(root, "bucket", "chunks", "0", "4")
+	require.NoError(t, os.MkdirAll(dir, 0777))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "4000_0_3"), []byte("abc"), 0666))
+	_, err := b.HeadObject(ctx, "bucket", "chunks/0/4/4000_0_3")
+	require.NoError(t, err)
+
+	// Another host writes a new object into the cached directory.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "4096_0_5"), []byte("hello"), 0666))
+	obj, err := b.HeadObject(ctx, "bucket", "chunks/0/4/4096_0_5")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), obj.Size)
+	obj, err = b.GetObject(ctx, "bucket", "chunks/0/4/4096_0_5", nil)
+	require.NoError(t, err)
+	data, err := io.ReadAll(obj.Contents)
+	require.NoError(t, err)
+	_ = obj.Contents.Close()
+	assert.Equal(t, "hello", string(data))
+
+	// DELETE removes it from the remote, then it is gone.
+	require.NoError(t, b.deleteObject(ctx, "bucket", "chunks/0/4/4096_0_5"))
+	_, statErr := os.Stat(filepath.Join(dir, "4096_0_5"))
+	assert.True(t, os.IsNotExist(statErr), "DELETE must remove the object on the remote")
+	_, err = b.HeadObject(ctx, "bucket", "chunks/0/4/4096_0_5")
+	assert.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey))
+
+	// Deleted by another host first: DELETE still succeeds.
+	require.NoError(t, os.Remove(filepath.Join(dir, "4000_0_3")))
+	assert.NoError(t, b.deleteObject(ctx, "bucket", "chunks/0/4/4000_0_3"))
+}
+
+// TestKazGetObjectDeletedElsewhere checks a GET of an object still cached
+// here but deleted by another host fails instead of returning data or 404.
+func TestKazGetObjectDeletedElsewhere(t *testing.T) {
+	ctx := context.Background()
+	b, _, root := newKazBackend(t, true, nil)
+	p := filepath.Join(root, "bucket", "obj")
+	require.NoError(t, os.WriteFile(p, []byte("abc"), 0666))
+	_, err := b.HeadObject(ctx, "bucket", "obj")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(p))
+
+	obj, err := b.GetObject(ctx, "bucket", "obj", nil)
+	if err == nil {
+		_, err = io.ReadAll(obj.Contents)
+		_ = obj.Contents.Close()
+	}
+	assert.Error(t, err)
+	assert.False(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey), "must not look like a clean 404: %v", err)
+}
+
+// TestKazPutCreatesParents checks a PUT into directories that do not exist
+// yet works in lookup mode and the object is visible right away.
+func TestKazPutCreatesParents(t *testing.T) {
+	ctx := context.Background()
+	b, _, root := newKazBackend(t, true, nil)
+	_, err := b.PutObject(ctx, "bucket", "chunks/0/9/9000_0_4", map[string]string{}, strings.NewReader("data"), 4)
+	require.NoError(t, err)
+	obj, err := b.HeadObject(ctx, "bucket", "chunks/0/9/9000_0_4")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), obj.Size)
+	got, err := os.ReadFile(filepath.Join(root, "bucket", "chunks", "0", "9", "9000_0_4"))
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(got))
+}
+
+// TestKazBucketStatErrorsElsewhereAreNot404 checks LIST, PUT and bucket
+// DELETE also report NoSuchBucket only when the bucket does not exist and
+// pass other remote errors through.
+func TestKazBucketStatErrorsElsewhereAreNot404(t *testing.T) {
+	ctx := context.Background()
+	for _, lookup := range []bool{false, true} {
+		t.Run(map[bool]string{false: "list", true: "lookup"}[lookup], func(t *testing.T) {
+			b, ff, _ := newKazBackend(t, lookup, nil)
+
+			_, err := b.ListBucket(ctx, "nobucket", nil, gofakes3.ListBucketPage{})
+			assert.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchBucket), "LIST missing: %v", err)
+			_, err = b.PutObject(ctx, "nobucket", "k", map[string]string{}, strings.NewReader("x"), 1)
+			assert.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchBucket), "PUT missing: %v", err)
+			err = b.DeleteBucket(ctx, "nobucket")
+			assert.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchBucket), "DELETE bucket missing: %v", err)
+
+			ff.fail.Store(true)
+			v, err := b.s.getVFS(ctx)
+			require.NoError(t, err)
+			root, err := v.Root()
+			require.NoError(t, err)
+			root.ForgetAll()
+
+			_, err = b.ListBucket(ctx, "bucket", nil, gofakes3.ListBucketPage{})
+			assert.ErrorIs(t, err, errKaz, "LIST")
+			_, err = b.PutObject(ctx, "bucket", "k", map[string]string{}, strings.NewReader("x"), 1)
+			assert.ErrorIs(t, err, errKaz, "PUT")
+			err = b.DeleteBucket(ctx, "bucket")
+			assert.ErrorIs(t, err, errKaz, "DELETE bucket")
 		})
 	}
 }
