@@ -32,6 +32,7 @@ type WriteFileHandle struct {
 	writeCalled bool // set the first time Write() is called
 	opened      bool
 	truncated   bool
+	uploadMeta  fs.Metadata // metadata sent with the upload, see SetKazUploadMetadata
 }
 
 // Check interfaces
@@ -91,7 +92,15 @@ func (fh *WriteFileHandle) openPending() (err error) {
 		}()
 		defer vfscommon.RecoverPanic(fh.remote, &err)
 		// NB Rcat deals with Stats.Transferring, etc.
-		o, err = operations.Rcat(fh.ctx, fh.file.Fs(), fh.remote, pipeReader, time.Now(), nil)
+		ctx := fh.ctx
+		if fh.uploadMeta != nil {
+			// The backend only sends metadata when --metadata is set, so
+			// enable it for this upload alone.
+			var ci *fs.ConfigInfo
+			ctx, ci = fs.AddConfig(ctx)
+			ci.Metadata = true
+		}
+		o, err = operations.Rcat(ctx, fh.file.Fs(), fh.remote, pipeReader, time.Now(), fh.uploadMeta)
 		if err != nil {
 			fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
 		}
