@@ -38,6 +38,10 @@ type Dir struct {
 	items   map[string]Node   // directory entries - can be empty but not nil
 	virtual map[string]vState // virtual directory entries - may be nil
 
+	// lookupArmed is true while cleanupTimer is scheduled for entries added by
+	// a kaz lookup (--kaz-vfs-lookup-by-path). Protected by mu.
+	lookupArmed bool
+
 	modTimeMu sync.Mutex // protects the following
 	modTime   time.Time
 
@@ -84,6 +88,8 @@ func (d *Dir) cacheCleanup() {
 
 	d.mu.Lock()
 	_, stale := d._age(when)
+	// The timer has fired; the next lookup hit arms it again.
+	d.lookupArmed = false
 	d.mu.Unlock()
 
 	if stale {
@@ -240,6 +246,8 @@ func (d *Dir) ForgetAll() (hasVirtual bool) {
 		d.read = time.Time{}
 		d.items = make(map[string]Node)
 		d.cleanupTimer.Stop()
+		// The timer is stopped; let the next lookup hit arm it again.
+		d.lookupArmed = false
 	} else {
 		d.cleanupTimer.Reset(time.Duration(d.vfs.Opt.DirCacheTime * 2))
 	}
@@ -860,10 +868,14 @@ func (d *Dir) statMetadata(leaf, baseLeaf string) (metaNode Node, err error) {
 // contains files with names that differ only by case.
 func (d *Dir) stat(leaf string) (Node, error) {
 	d.mu.Lock()
-	err := d._readDir()
-	if err != nil {
-		d.mu.Unlock()
-		return nil, err
+	// In kaz lookup mode the directory is never listed to answer a Stat: a
+	// cached entry is used as is and a missing one is looked up directly.
+	if !d.vfs.Opt.KazLookupByPath {
+		err := d._readDir()
+		if err != nil {
+			d.mu.Unlock()
+			return nil, err
+		}
 	}
 	item, ok := d.items[leaf]
 	d.mu.Unlock()
@@ -881,31 +893,50 @@ func (d *Dir) stat(leaf string) (Node, error) {
 		}
 	}
 
-	ci := fs.GetConfig(d.vfs.ctx)
-	normUnicode := !ci.NoUnicodeNormalization
-	normCase := ci.IgnoreCaseSync || d.vfs.Opt.CaseInsensitive
-	if !ok && (normUnicode || normCase) {
-		leafNormalized := operations.ToNormal(leaf, normUnicode, normCase) // this handles both case and unicode normalization
-		d.mu.Lock()
-		for name, node := range d.items {
-			if operations.ToNormal(name, normUnicode, normCase) == leafNormalized {
-				if ok {
-					// duplicate normalized match is an error
-					d.mu.Unlock()
-					return nil, fmt.Errorf("duplicate filename %q detected with case/unicode normalization settings", leaf)
-				}
-				// found a normalized match
-				ok = true
-				item = node
-			}
+	if !ok {
+		var err error
+		item, ok, err = d.statCachedNormalized(leaf)
+		if err != nil {
+			return nil, err
 		}
-		d.mu.Unlock()
 	}
 
 	if !ok {
+		if d.vfs.Opt.KazLookupByPath {
+			return d.lookup(leaf)
+		}
 		return nil, ENOENT
 	}
 	return item, nil
+}
+
+// statCachedNormalized looks for leaf among the cached items using the
+// unicode and case normalisation settings, without asking the remote.
+//
+// It returns an error if more than one cached name matches. It takes d.mu
+// itself, so it must be called without it held.
+func (d *Dir) statCachedNormalized(leaf string) (item Node, ok bool, err error) {
+	ci := fs.GetConfig(d.vfs.ctx)
+	normUnicode := !ci.NoUnicodeNormalization
+	normCase := ci.IgnoreCaseSync || d.vfs.Opt.CaseInsensitive
+	if !normUnicode && !normCase {
+		return nil, false, nil
+	}
+	leafNormalized := operations.ToNormal(leaf, normUnicode, normCase) // this handles both case and unicode normalization
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for name, node := range d.items {
+		if operations.ToNormal(name, normUnicode, normCase) == leafNormalized {
+			if ok {
+				// duplicate normalized match is an error
+				return nil, false, fmt.Errorf("duplicate filename %q detected with case/unicode normalization settings", leaf)
+			}
+			// found a normalized match
+			ok = true
+			item = node
+		}
+	}
+	return item, ok, nil
 }
 
 // Check to see if a directory is empty
