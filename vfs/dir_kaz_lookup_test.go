@@ -207,3 +207,21 @@ func TestKazLookupEntriesExpire(t *testing.T) {
 	_, err = v.Stat("a")
 	assert.True(t, errors.Is(err, ENOENT))
 }
+
+// TestKazRemoveAlreadyGone checks removing a cached file that another client
+// already deleted succeeds and drops the stale entry.
+func TestKazRemoveAlreadyGone(t *testing.T) {
+	r, _, v := newLookupVFS(t, true, time.Hour)
+	ctx := context.Background()
+	obj := r.WriteObject(ctx, "dir/a", "aaa", t1)
+	_, err := v.Stat("dir/a")
+	require.NoError(t, err)
+
+	o, err := r.Fremote.NewObject(ctx, obj.Path)
+	require.NoError(t, err)
+	require.NoError(t, o.Remove(ctx))
+
+	require.NoError(t, v.Remove("dir/a"))
+	_, err = v.Stat("dir/a")
+	assert.True(t, errors.Is(err, ENOENT))
+}
