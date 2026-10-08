@@ -76,3 +76,30 @@ func (d *Dir) _armLookupCleanup() {
 	d.lookupArmed = true
 	d.cleanupTimer.Reset(time.Duration(d.vfs.Opt.DirCacheTime * 2))
 }
+
+// kazCreateNoLookup returns the cached file node for name, or a new file
+// node, without asking the remote whether name exists.
+//
+// It serves O_CREATE|O_TRUNC opens in kaz lookup mode: truncation makes any
+// existing content irrelevant and the backend's Put replaces an existing
+// object, so the remote lookups Stat and Create would make are wasted.
+func (d *Dir) kazCreateNoLookup(name string) (*File, error) {
+	d.mu.RLock()
+	node, ok := d.items[name]
+	d.mu.RUnlock()
+	if ok {
+		if file, isFile := node.(*File); isFile {
+			return file, nil
+		}
+		return nil, EEXIST
+	}
+	if d.vfs.Opt.ReadOnly {
+		return nil, EROFS
+	}
+	if err := d.SetModTime(time.Now()); err != nil {
+		fs.Errorf(d, "Dir.Create failed to set modtime on parent dir: %v", err)
+		return nil, err
+	}
+	// This gets added to the directory when the file is opened for write
+	return newFile(d, d.Path(), nil, name), nil
+}

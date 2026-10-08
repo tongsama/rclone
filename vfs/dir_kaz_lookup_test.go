@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,11 +18,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// countingFs wraps an fs.Fs to count directory listings and, when
-// newObjectErr is set, to make NewObject fail like a remote error would.
+// countingFs wraps an fs.Fs to count directory listings and NewObject calls
+// and, when newObjectErr is set, to make NewObject fail like a remote error
+// would.
 type countingFs struct {
 	fs.Fs
 	lists        atomic.Int64
+	newObjects   atomic.Int64
 	newObjectErr error // set before the VFS is used; read only afterwards
 }
 
@@ -30,8 +34,10 @@ func (c *countingFs) List(ctx context.Context, dir string) (fs.DirEntries, error
 	return c.Fs.List(ctx, dir)
 }
 
-// NewObject returns newObjectErr if set, otherwise delegates.
+// NewObject counts the call, then returns newObjectErr if set, otherwise
+// delegates.
 func (c *countingFs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	c.newObjects.Add(1)
 	if c.newObjectErr != nil {
 		return nil, c.newObjectErr
 	}
@@ -290,4 +296,89 @@ func TestKazRemoveKeepsErrorWhenUnsure(t *testing.T) {
 	err = v.Remove("dir/a")
 	cf.newObjectErr = nil
 	assert.Error(t, err)
+}
+
+// TestKazCreateTruncNoLookup checks an O_CREATE|O_TRUNC open of a new name
+// makes no NewObject call and the written data reaches the remote.
+func TestKazCreateTruncNoLookup(t *testing.T) {
+	r, cf, v := newLookupVFS(t, true, time.Hour)
+	ctx := context.Background()
+	r.WriteObject(ctx, "dir/a", "aaa", t1)
+	_, err := v.Stat("dir")
+	require.NoError(t, err)
+	cf.newObjects.Store(0)
+
+	fd, err := v.OpenFile("dir/new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), cf.newObjects.Load(), "open must not ask the remote")
+	_, err = fd.Write([]byte("xyz"))
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+
+	o, err := r.Fremote.NewObject(ctx, "dir/new")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), o.Size())
+}
+
+// TestKazCreateTruncOverwritesUncached checks truncating an existing remote
+// object the VFS has not cached replaces its content.
+func TestKazCreateTruncOverwritesUncached(t *testing.T) {
+	r, _, v := newLookupVFS(t, true, time.Hour)
+	ctx := context.Background()
+	r.WriteObject(ctx, "dir/a", "aaa", t1)
+	r.WriteObject(ctx, "dir/b", "old", t1)
+	_, err := v.Stat("dir/a")
+	require.NoError(t, err)
+
+	fd, err := v.OpenFile("dir/b", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	require.NoError(t, err)
+	_, err = fd.Write([]byte("new!"))
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
+
+	o, err := r.Fremote.NewObject(ctx, "dir/b")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), o.Size())
+	rc, err := o.Open(ctx)
+	require.NoError(t, err)
+	data, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	assert.Equal(t, "new!", string(data))
+
+	node, err := v.Stat("dir/b")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), node.Size())
+}
+
+// TestKazCreateWithoutTruncStillLooksUp checks O_CREATE without O_TRUNC keeps
+// asking the remote whether the file exists.
+func TestKazCreateWithoutTruncStillLooksUp(t *testing.T) {
+	r, cf, v := newLookupVFS(t, true, time.Hour)
+	r.WriteObject(context.Background(), "dir/a", "aaa", t1)
+	_, err := v.Stat("dir")
+	require.NoError(t, err)
+	cf.newObjects.Store(0)
+
+	fd, err := v.OpenFile("dir/a", os.O_WRONLY|os.O_CREATE, 0666)
+	if fd != nil {
+		_ = fd.Close()
+	}
+	_ = err
+	assert.Greater(t, cf.newObjects.Load(), int64(0))
+}
+
+// TestKazCreateTruncOptionOff checks the upstream path still creates and
+// writes a file with O_CREATE|O_TRUNC when the option is off.
+func TestKazCreateTruncOptionOff(t *testing.T) {
+	r, _, v := newLookupVFS(t, false, time.Hour)
+	r.WriteObject(context.Background(), "dir/a", "aaa", t1)
+	_, err := v.Stat("dir")
+	require.NoError(t, err)
+
+	fd, err := v.OpenFile("dir/new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	require.NoError(t, err)
+	_, err = fd.Write([]byte("xyz"))
+	require.NoError(t, err)
+	require.NoError(t, fd.Close())
 }
