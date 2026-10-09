@@ -88,6 +88,9 @@ func (b *s3Backend) ListBuckets(ctx context.Context) ([]gofakes3.BucketInfo, err
 }
 
 // ListBucket lists the objects in the given bucket.
+//
+// With --kaz-s3-list-by-key-order only the directories needed for the page
+// are read, otherwise everything under the prefix is read and sorted.
 func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofakes3.Prefix, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
 	_vfs, err := b.s.getVFS(ctx)
 	if err != nil {
@@ -107,6 +110,10 @@ func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofak
 	}
 	if strings.TrimSpace(prefix.Delimiter) == "" {
 		prefix.HasDelimiter = false
+	}
+
+	if b.s.opt.KazListByKeyOrder {
+		return b.kazListBucket(ctx, _vfs, bucket, prefix, page)
 	}
 
 	response := gofakes3.NewObjectList()
