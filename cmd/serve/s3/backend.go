@@ -230,29 +230,43 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 	size := node.Size()
 	hash := getFileHashByte(node, b.s.etagHashType)
 
-	in, err := file.Open(os.O_RDONLY)
-	if err != nil {
-		return nil, gofakes3.ErrInternal
+	var rdr io.ReadCloser
+	var rnge *gofakes3.ObjectRange
+	if fobj, ok := entry.(fs.Object); ok && b.s.opt.KazCancelGetOnDisconnect {
+		rnge, err = rangeRequest.Range(size)
+		if err != nil {
+			return nil, err
+		}
+		rdr, err = kazOpenObject(ctx, _vfs, fobj, rnge)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		in, err := file.Open(os.O_RDONLY)
+		if err != nil {
+			return nil, gofakes3.ErrInternal
+		}
+		rdr = in
+		rnge, err = rangeRequest.Range(size)
+		if err != nil {
+			_ = in.Close()
+			return nil, err
+		}
+
+		if rnge != nil {
+			if _, err := in.Seek(rnge.Start, io.SeekStart); err != nil {
+				_ = in.Close()
+				return nil, err
+			}
+			rdr = limitReadCloser(rdr, in.Close, rnge.Length)
+		}
 	}
 	defer func() {
 		// If an error occurs, the caller may not have access to Object.Body in order to close it:
 		if err != nil {
-			_ = in.Close()
+			_ = rdr.Close()
 		}
 	}()
-
-	var rdr io.ReadCloser = in
-	rnge, err := rangeRequest.Range(size)
-	if err != nil {
-		return nil, err
-	}
-
-	if rnge != nil {
-		if _, err := in.Seek(rnge.Start, io.SeekStart); err != nil {
-			return nil, err
-		}
-		rdr = limitReadCloser(rdr, in.Close, rnge.Length)
-	}
 
 	mimeType := fs.MimeTypeFromName(objectName)
 	if fobj, ok := entry.(fs.Object); ok {

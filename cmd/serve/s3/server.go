@@ -52,6 +52,16 @@ func newServer(ctx context.Context, f fs.Fs, opt *Options, vfsOpt *vfscommon.Opt
 			return nil, errors.New("--kaz-s3-persist-metadata needs --vfs-cache-mode off")
 		}
 	}
+	if opt.KazCancelGetOnDisconnect {
+		vo := vfscommon.Opt
+		if vfsOpt != nil {
+			vo = *vfsOpt
+		}
+		if vo.CacheMode != vfscommon.CacheModeOff {
+			// With a cache the VFS may serve or fill the cache from the download.
+			return nil, errors.New("--kaz-s3-cancel-get-on-disconnect needs --vfs-cache-mode off")
+		}
+	}
 	w := &Server{
 		f:            f,
 		ctx:          ctx,
