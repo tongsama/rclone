@@ -88,6 +88,9 @@ func (b *s3Backend) ListBuckets(ctx context.Context) ([]gofakes3.BucketInfo, err
 }
 
 // ListBucket lists the objects in the given bucket.
+//
+// With --kaz-s3-list-by-key-order only the directories needed for the page
+// are read, otherwise everything under the prefix is read and sorted.
 func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofakes3.Prefix, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
 	_vfs, err := b.s.getVFS(ctx)
 	if err != nil {
@@ -107,6 +110,10 @@ func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofak
 	}
 	if strings.TrimSpace(prefix.Delimiter) == "" {
 		prefix.HasDelimiter = false
+	}
+
+	if b.s.opt.KazListByKeyOrder {
+		return b.kazListBucket(ctx, _vfs, bucket, prefix, page)
 	}
 
 	response := gofakes3.NewObjectList()
@@ -230,29 +237,43 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 	size := node.Size()
 	hash := getFileHashByte(node, b.s.etagHashType)
 
-	in, err := file.Open(os.O_RDONLY)
-	if err != nil {
-		return nil, gofakes3.ErrInternal
+	var rdr io.ReadCloser
+	var rnge *gofakes3.ObjectRange
+	if fobj, ok := entry.(fs.Object); ok && b.s.opt.KazCancelGetOnDisconnect {
+		rnge, err = rangeRequest.Range(size)
+		if err != nil {
+			return nil, err
+		}
+		rdr, err = kazOpenObject(ctx, _vfs, fobj, rnge)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		in, err := file.Open(os.O_RDONLY)
+		if err != nil {
+			return nil, gofakes3.ErrInternal
+		}
+		rdr = in
+		rnge, err = rangeRequest.Range(size)
+		if err != nil {
+			_ = in.Close()
+			return nil, err
+		}
+
+		if rnge != nil {
+			if _, err := in.Seek(rnge.Start, io.SeekStart); err != nil {
+				_ = in.Close()
+				return nil, err
+			}
+			rdr = limitReadCloser(rdr, in.Close, rnge.Length)
+		}
 	}
 	defer func() {
 		// If an error occurs, the caller may not have access to Object.Body in order to close it:
 		if err != nil {
-			_ = in.Close()
+			_ = rdr.Close()
 		}
 	}()
-
-	var rdr io.ReadCloser = in
-	rnge, err := rangeRequest.Range(size)
-	if err != nil {
-		return nil, err
-	}
-
-	if rnge != nil {
-		if _, err := in.Seek(rnge.Start, io.SeekStart); err != nil {
-			return nil, err
-		}
-		rdr = limitReadCloser(rdr, in.Close, rnge.Length)
-	}
 
 	mimeType := fs.MimeTypeFromName(objectName)
 	if fobj, ok := entry.(fs.Object); ok {

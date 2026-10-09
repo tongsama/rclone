@@ -7,7 +7,8 @@ import (
 	"github.com/rclone/gofakes3"
 )
 
-// pager splits the object list into smulitply pages.
+// pager sorts the whole object list and returns the page of it after
+// page.Marker. It is the listing used without --kaz-s3-list-by-key-order.
 func (db *s3Backend) pager(list *gofakes3.ObjectList, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
 	// sort by alphabet
 	sort.Slice(list.CommonPrefixes, func(i, j int) bool {
@@ -22,18 +23,17 @@ func (db *s3Backend) pager(list *gofakes3.ObjectList, page gofakes3.ListBucketPa
 		tokens = 1000
 	}
 	if page.HasMarker {
-		for i, obj := range list.Contents {
-			if obj.Key == page.Marker {
-				list.Contents = list.Contents[i+1:]
-				break
-			}
-		}
-		for i, obj := range list.CommonPrefixes {
-			if obj.Prefix == page.Marker {
-				list.CommonPrefixes = list.CommonPrefixes[i+1:]
-				break
-			}
-		}
+		// S3 returns the keys after the marker, which need not be a key
+		// itself (start-after may be any string), so search by order
+		// rather than for an exact match.
+		i := sort.Search(len(list.Contents), func(i int) bool {
+			return list.Contents[i].Key > page.Marker
+		})
+		list.Contents = list.Contents[i:]
+		j := sort.Search(len(list.CommonPrefixes), func(j int) bool {
+			return list.CommonPrefixes[j].Prefix > page.Marker
+		})
+		list.CommonPrefixes = list.CommonPrefixes[j:]
 	}
 
 	response := gofakes3.NewObjectList()

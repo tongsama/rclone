@@ -54,6 +54,16 @@ var OptionsInfo = fs.Options{{
 	Default: false,
 	Help:    "[kaz] Store X-Amz-Meta-* user metadata with the object in the backend (as s3m-* metadata) instead of in memory. Needs --vfs-cache-mode off. On drive --drive-kaz-properties is required, otherwise metadata of objects uploaded by this server is missing until they are listed again and stale metadata survives overwrites",
 	Groups:  "Kaz",
+}, {
+	Name:    "kaz_s3_cancel_get_on_disconnect",
+	Default: false,
+	Help:    "[kaz] Open the backend download of a GET with the request, so that it is canceled when the client goes away, even while the backend has not answered yet. Needs --vfs-cache-mode off",
+	Groups:  "Kaz",
+}, {
+	Name:    "kaz_s3_list_by_key_order",
+	Default: false,
+	Help:    "[kaz] Serve ListObjects by walking the directories in S3 key order and stopping when the page is full, instead of reading and sorting everything under the prefix for every page. Directories before the marker are not read",
+	Groups:  "Kaz",
 }}.
 	Add(httplib.ConfigInfo).
 	Add(httplib.AuthConfigInfo)
@@ -69,6 +79,8 @@ type Options struct {
 	MultipartStreamingBufferLimit fs.SizeSuffix `config:"multipart_streaming_buffer_limit"`
 	MultipartExpiry               fs.Duration   `config:"multipart_expiry"`
 	KazPersistMetadata            bool          `config:"kaz_s3_persist_metadata"`
+	KazCancelGetOnDisconnect      bool          `config:"kaz_s3_cancel_get_on_disconnect"`
+	KazListByKeyOrder             bool          `config:"kaz_s3_list_by_key_order"`
 	Auth                          httplib.AuthConfig
 	HTTP                          httplib.Config
 }

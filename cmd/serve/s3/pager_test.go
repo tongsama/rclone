@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -28,5 +29,33 @@ func TestPagerSortsContentsByKey(t *testing.T) {
 
 	if got.Contents[0].Key != "a.txt" || got.Contents[1].Key != "b.txt" {
 		t.Fatalf("expected lexicographic key order [a.txt b.txt], got [%s %s]", got.Contents[0].Key, got.Contents[1].Key)
+	}
+}
+
+// TestPagerMarkerNotInList checks a marker that is not itself a key (for
+// example an S3 start-after) resumes after the marker instead of starting the
+// listing again.
+func TestPagerMarkerNotInList(t *testing.T) {
+	list := gofakes3.NewObjectList()
+	for _, key := range []string{"a", "c", "e"} {
+		list.Add(&gofakes3.Content{Key: key})
+	}
+	list.AddPrefix("b/")
+	list.AddPrefix("d/")
+
+	got, err := (&s3Backend{}).pager(list, gofakes3.ListBucketPage{MaxKeys: 10, HasMarker: true, Marker: "bb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, c := range got.Contents {
+		keys = append(keys, c.Key)
+	}
+	var prefixes []string
+	for _, p := range got.CommonPrefixes {
+		prefixes = append(prefixes, p.Prefix)
+	}
+	if strings.Join(keys, ",") != "c,e" || strings.Join(prefixes, ",") != "d/" {
+		t.Fatalf("expected keys [c e] and prefixes [d/] after marker bb, got %v %v", keys, prefixes)
 	}
 }
