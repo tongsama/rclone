@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,7 +12,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/rclone/gofakes3"
+	"github.com/rclone/rclone/cmd/serve/proxy"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/random"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -361,5 +369,53 @@ func TestKazListOffKeepsOldListing(t *testing.T) {
 	}
 	for _, maxKeys := range []int64{1, 3} {
 		assert.Equal(t, kazExpected(t, bucketDir, "", false), kazListAll(t, b, "", false, maxKeys), "maxKeys=%d", maxKeys)
+	}
+}
+
+// TestKazListMinioPaging pages through a listing over HTTP with a real S3
+// client, using ListObjects V2 (continuation-token) and V1 (the last key, as
+// no NextMarker is sent without a delimiter), and checks every entry comes
+// back exactly once in key order.
+func TestKazListMinioPaging(t *testing.T) {
+	fstest.Initialise()
+	ctx := context.Background()
+	root := t.TempDir()
+	bucketDir := filepath.Join(root, "bucket")
+	require.NoError(t, os.MkdirAll(bucketDir, 0777))
+	makeKazTree(t, bucketDir, rand.New(rand.NewPCG(3, 4)), 0)
+	f, err := fs.NewFs(ctx, root)
+	require.NoError(t, err)
+
+	keyid, keysec := random.String(16), random.String(16)
+	opt := Opt
+	opt.AuthKey = []string{keyid + "," + keysec}
+	opt.HTTP.ListenAddr = []string{endpoint}
+	opt.KazListByKeyOrder = true
+	w, err := newServer(ctx, f, &opt, &vfscommon.Opt, &proxy.Opt)
+	require.NoError(t, err)
+	go func() { _ = w.Serve() }()
+	t.Cleanup(func() { _ = w.Shutdown() })
+	u, err := url.Parse(w.server.URLs()[0])
+	require.NoError(t, err)
+	client, err := minio.New(u.Host, &minio.Options{Creds: credentials.NewStaticV4(keyid, keysec, "")})
+	require.NoError(t, err)
+
+	for _, v1 := range []bool{false, true} {
+		for _, delimiter := range []bool{false, true} {
+			for _, maxKeys := range []int{1, 3} {
+				var got []string
+				for obj := range client.ListObjects(ctx, "bucket", minio.ListObjectsOptions{Recursive: !delimiter, MaxKeys: maxKeys, UseV1: v1}) {
+					require.NoError(t, obj.Err)
+					got = append(got, obj.Key)
+				}
+				want := kazExpected(t, bucketDir, "", delimiter)
+				if delimiter {
+					// The client sends a page's Contents before its
+					// CommonPrefixes, so only the set can be compared.
+					sort.Strings(got)
+				}
+				assert.Equal(t, want, got, "v1=%v delimiter=%v maxKeys=%d", v1, delimiter, maxKeys)
+			}
+		}
 	}
 }
