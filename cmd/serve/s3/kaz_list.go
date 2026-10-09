@@ -85,7 +85,12 @@ func (b *s3Backend) kazListBucket(ctx context.Context, _vfs *vfs.VFS, bucket str
 // entries whose name starts with name in key order, descending into sub
 // directories unless they are returned as CommonPrefixes. It returns
 // errKazPageFull once the page is full and one more entry exists.
+// Sub directories wholly at or before the marker are skipped unread, and the
+// walk stops with the context's error once the request is canceled.
 func (l *kazLister) walk(dir, name string) error {
+	if err := l.ctx.Err(); err != nil {
+		return err
+	}
 	fp, err := bucketDirPath(l.bucket, dir)
 	if err != nil {
 		// A listing prefix that can't be represented as a path matches nothing.
@@ -126,7 +131,18 @@ func (l *kazLister) walk(dir, name string) error {
 			}
 			continue
 		}
-		if err := l.walk(e.key, ""); err != nil {
+		// Every key below e starts with e.sortKey, so when that is before
+		// the marker and the marker is not inside e, the whole subtree is
+		// at or before the marker and need not be read.
+		if l.hasMarker && e.sortKey < l.marker && !strings.HasPrefix(l.marker, e.sortKey) {
+			continue
+		}
+		err := l.walk(e.key, "")
+		if errors.Is(err, gofakes3.ErrNoSuchKey) {
+			// Gone since its parent was read: it holds no keys any more.
+			continue
+		}
+		if err != nil {
 			return err
 		}
 	}

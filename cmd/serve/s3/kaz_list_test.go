@@ -2,9 +2,11 @@ package s3
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -192,4 +194,172 @@ func TestKazListHidesTempObjects(t *testing.T) {
 	assert.Equal(t, "d/f1", resp.Contents[0].Key)
 	assert.Equal(t, "d/f2", resp.Contents[1].Key)
 	assert.False(t, resp.IsTruncated)
+}
+
+// makeKazFlatTree creates n directories d00, d01, ... in the bucket, each
+// with the files f0, f1 and f2.
+func makeKazFlatTree(t *testing.T, root string, n int) {
+	for i := range n {
+		dir := filepath.Join(root, "bucket", fmt.Sprintf("d%02d", i))
+		require.NoError(t, os.MkdirAll(dir, 0777))
+		for _, name := range []string{"f0", "f1", "f2"} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(name), 0666))
+		}
+	}
+}
+
+// TestKazListReadsOnlyNeededDirs checks the first page reads only the
+// directories it needs, and that a page after a marker deep in the bucket
+// does not read the directories before the marker.
+func TestKazListReadsOnlyNeededDirs(t *testing.T) {
+	ctx := context.Background()
+
+	b, ff, root := newKazBackend(t, false, kazByKeyOrder)
+	makeKazFlatTree(t, root, 50)
+	resp, err := kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
+	require.NoError(t, err)
+	assert.True(t, resp.IsTruncated)
+	assert.Equal(t, "d00/f1", resp.NextMarker)
+	assert.LessOrEqual(t, ff.lists.Load(), int64(5), "first page must not read all 50 directories")
+
+	// A fresh backend has nothing cached, as after a restart.
+	b, ff, root = newKazBackend(t, false, kazByKeyOrder)
+	makeKazFlatTree(t, root, 50)
+	resp, err = kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 2, HasMarker: true, Marker: "d40/f2"})
+	require.NoError(t, err)
+	require.Len(t, resp.Contents, 2)
+	assert.Equal(t, "d41/f0", resp.Contents[0].Key)
+	assert.LessOrEqual(t, ff.lists.Load(), int64(6), "directories before the marker must not be read")
+}
+
+// TestKazListStopsOnCancel checks the walk stops between directories with
+// context.Canceled once the request is canceled.
+func TestKazListStopsOnCancel(t *testing.T) {
+	b, ff, root := newKazBackend(t, false, kazByKeyOrder)
+	makeKazFlatTree(t, root, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var listed []string
+	ff.onList = func(dir string) error {
+		listed = append(listed, dir)
+		if dir == "bucket/d01" {
+			cancel()
+		}
+		return nil
+	}
+
+	_, err := kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 1000})
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, slices.Contains(listed, "bucket/d02"), "walk must stop after the cancel: %v", listed)
+}
+
+// TestKazListDirErrorIsNotEmpty checks a directory that can't be read fails
+// the listing instead of being left out of it.
+func TestKazListDirErrorIsNotEmpty(t *testing.T) {
+	b, ff, root := newKazBackend(t, false, kazByKeyOrder)
+	makeKazFlatTree(t, root, 5)
+	ff.onList = func(dir string) error {
+		if dir == "bucket/d03" {
+			return errKaz
+		}
+		return nil
+	}
+
+	_, err := kazListPage(t, b, context.Background(), "", false, gofakes3.ListBucketPage{MaxKeys: 1000})
+	assert.ErrorIs(t, err, errKaz)
+}
+
+// TestKazListContinuesAfterDeletes deletes objects through serve s3 between
+// pages, as juicefs gc --delete does, so that emptied directories and the
+// marker key itself disappear, and checks the listing still returns every
+// remaining key exactly once.
+func TestKazListContinuesAfterDeletes(t *testing.T) {
+	ctx := context.Background()
+	b, _, root := newKazBackend(t, false, kazByKeyOrder)
+	makeKazFlatTree(t, root, 5)
+
+	var got []string
+	page := gofakes3.ListBucketPage{MaxKeys: 2}
+	for i := 0; ; i++ {
+		require.Less(t, i, 100)
+		resp, err := kazListPage(t, b, ctx, "", false, page)
+		require.NoError(t, err)
+		for _, c := range resp.Contents {
+			got = append(got, c.Key)
+			// Delete every key of d01 and d02 as soon as it is listed.
+			if strings.HasPrefix(c.Key, "d01/") || strings.HasPrefix(c.Key, "d02/") {
+				require.NoError(t, b.deleteObject(ctx, "bucket", c.Key))
+			}
+		}
+		if !resp.IsTruncated {
+			break
+		}
+		page.HasMarker, page.Marker = true, resp.NextMarker
+	}
+	assert.Equal(t, kazExpectedFlat(5), got)
+	_, err := os.Stat(filepath.Join(root, "bucket", "d01"))
+	assert.True(t, os.IsNotExist(err), "the emptied directory must have been cleaned up")
+}
+
+// TestKazListDirRemovedElsewhere removes a directory on the remote after its
+// parent was listed but before the walk reaches it, as another host sharing
+// the remote can, and checks it is treated as empty.
+func TestKazListDirRemovedElsewhere(t *testing.T) {
+	ctx := context.Background()
+	b, _, root := newKazBackend(t, false, kazByKeyOrder)
+	makeKazFlatTree(t, root, 5)
+
+	resp, err := kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
+	require.NoError(t, err)
+	require.True(t, resp.IsTruncated)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "bucket", "d02")))
+
+	got := []string{resp.Contents[0].Key, resp.Contents[1].Key}
+	page := gofakes3.ListBucketPage{MaxKeys: 2, HasMarker: true, Marker: resp.NextMarker}
+	for i := 0; ; i++ {
+		require.Less(t, i, 100)
+		resp, err = kazListPage(t, b, ctx, "", false, page)
+		require.NoError(t, err)
+		for _, c := range resp.Contents {
+			got = append(got, c.Key)
+		}
+		if !resp.IsTruncated {
+			break
+		}
+		page.HasMarker, page.Marker = true, resp.NextMarker
+	}
+	var want []string
+	for _, key := range kazExpectedFlat(5) {
+		if !strings.HasPrefix(key, "d02/") {
+			want = append(want, key)
+		}
+	}
+	assert.Equal(t, want, got)
+}
+
+// kazExpectedFlat returns the keys makeKazFlatTree creates for n directories.
+func kazExpectedFlat(n int) []string {
+	var keys []string
+	for i := range n {
+		for _, name := range []string{"f0", "f1", "f2"} {
+			keys = append(keys, fmt.Sprintf("d%02d/%s", i, name))
+		}
+	}
+	return keys
+}
+
+// TestKazListOffKeepsOldListing checks that without the option the old
+// listing still returns the whole tree when the result fits in one page, and
+// pages correctly without a delimiter now that the marker is compared by
+// order.
+func TestKazListOffKeepsOldListing(t *testing.T) {
+	b, _, root := newKazBackend(t, false, nil)
+	bucketDir := filepath.Join(root, "bucket")
+	makeKazTree(t, bucketDir, rand.New(rand.NewPCG(1, 2)), 0)
+	for _, delimiter := range []bool{false, true} {
+		assert.Equal(t, kazExpected(t, bucketDir, "", delimiter), kazListAll(t, b, "", delimiter, 1000), "delimiter=%v", delimiter)
+	}
+	for _, maxKeys := range []int64{1, 3} {
+		assert.Equal(t, kazExpected(t, bucketDir, "", false), kazListAll(t, b, "", false, maxKeys), "maxKeys=%d", maxKeys)
+	}
 }
