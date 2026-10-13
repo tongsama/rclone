@@ -108,6 +108,12 @@ func TestKazStatErrorsAreNot404(t *testing.T) {
 			assert.ErrorIs(t, err, errKaz, "DELETE")
 			_, err = b.BucketExists(ctx, "bucket")
 			assert.ErrorIs(t, err, errKaz, "BucketExists")
+			_, err = b.CopyObject(ctx, "bucket", "obj", "bucket", "copy", map[string]string{})
+			assert.ErrorIs(t, err, errKaz, "CopyObject")
+			assert.False(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey), "CopyObject must not be NoSuchKey")
+			_, err = b.CreateMultipartUpload(ctx, "bucket", "mp", map[string]string{})
+			assert.ErrorIs(t, err, errKaz, "CreateMultipartUpload")
+			assert.False(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchBucket), "CreateMultipartUpload must not be NoSuchBucket")
 		})
 	}
 }

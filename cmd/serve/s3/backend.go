@@ -660,7 +660,10 @@ func (b *s3Backend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket
 		return result, err
 	}
 	cStat, err := _vfs.Stat(fp)
-	if err != nil || !cStat.IsFile() {
+	if err != nil {
+		return result, keyStatError(srcKey, err)
+	}
+	if !cStat.IsFile() {
 		return result, gofakes3.KeyNotFound(srcKey)
 	}
 	if srcBucket == dstBucket && srcKey == dstKey {
