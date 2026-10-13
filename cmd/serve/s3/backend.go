@@ -252,7 +252,7 @@ func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofak
 	response := gofakes3.NewObjectList()
 	path, remaining := prefixParser(prefix)
 
-	err = b.listPage(_vfs, bucket, path, remaining, prefix.HasDelimiter, page, response)
+	err = b.listPage(ctx, _vfs, bucket, path, remaining, prefix.HasDelimiter, page, response)
 	if err == gofakes3.ErrNoSuchKey {
 		// AWS just returns an empty list
 		response = gofakes3.NewObjectList()

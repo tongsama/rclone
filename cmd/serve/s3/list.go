@@ -1,10 +1,12 @@
 package s3
 
 import (
+	"context"
 	"errors"
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/rclone/gofakes3"
 	"github.com/rclone/rclone/fs"
@@ -28,6 +30,8 @@ var errPageFull = errors.New("listing page full")
 // so the cost of a page is proportional to the keys it returns rather than to
 // the size of the subtree below the prefix.
 type lister struct {
+	ctx       context.Context // the request, whose cancellation stops the walk
+	started   time.Time       // when the page was started, for debug logging
 	vfs       *vfs.VFS
 	hashType  hash.Type // hash used for ETags
 	bucket    string
@@ -42,7 +46,7 @@ type lister struct {
 
 // newLister makes a lister which fills response with at most one page of the
 // listing of bucket, as described by page.
-func newLister(b *s3Backend, _vfs *vfs.VFS, bucket string, page gofakes3.ListBucketPage, response *gofakes3.ObjectList) *lister {
+func newLister(ctx context.Context, b *s3Backend, _vfs *vfs.VFS, bucket string, page gofakes3.ListBucketPage, response *gofakes3.ObjectList) *lister {
 	max := int(page.MaxKeys)
 	if max <= 0 {
 		// A missing or zero max-keys means the client didn't ask for a
@@ -50,6 +54,8 @@ func newLister(b *s3Backend, _vfs *vfs.VFS, bucket string, page gofakes3.ListBuc
 		max = 1000
 	}
 	return &lister{
+		ctx:       ctx,
+		started:   time.Now(),
 		vfs:       _vfs,
 		hashType:  b.s.etagHash(_vfs),
 		bucket:    bucket,
@@ -133,6 +139,11 @@ func (l *lister) addObject(key string, entry vfs.Node) error {
 // It returns errPageFull once the page is complete, and gofakes3.ErrNoSuchKey
 // if fdPath is not a directory.
 func (l *lister) list(fdPath, name string, addPrefix bool) error {
+	// Stop before reading another directory once the client has gone.
+	if err := l.ctx.Err(); err != nil {
+		return err
+	}
+
 	fp, err := bucketDirPath(l.bucket, fdPath)
 	if err != nil {
 		// A listing prefix that can't be represented as a path matches nothing.
@@ -208,12 +219,14 @@ func (l *lister) list(fdPath, name string, addPrefix bool) error {
 // subtree below fdPath is listed.
 //
 // It returns gofakes3.ErrNoSuchKey if fdPath is not a directory.
-func (b *s3Backend) listPage(_vfs *vfs.VFS, bucket, fdPath, name string, addPrefix bool, page gofakes3.ListBucketPage, response *gofakes3.ObjectList) error {
-	l := newLister(b, _vfs, bucket, page, response)
+func (b *s3Backend) listPage(ctx context.Context, _vfs *vfs.VFS, bucket, fdPath, name string, addPrefix bool, page gofakes3.ListBucketPage, response *gofakes3.ObjectList) error {
+	l := newLister(ctx, b, _vfs, bucket, page, response)
 	err := l.list(fdPath, name, addPrefix)
 	if err != nil && !errors.Is(err, errPageFull) {
 		return err
 	}
 	fs.Debugf("serve s3", "Listed %d keys from %d directories (truncated=%v)", l.keys, l.dirsRead, response.IsTruncated)
+	fs.Debugf(bucket, "kaz list: prefix=%q marker=%q entries=%d truncated=%v dirs=%d took=%v",
+		path.Join(fdPath, name), page.Marker, l.keys, response.IsTruncated, l.dirsRead, time.Since(l.started))
 	return nil
 }
