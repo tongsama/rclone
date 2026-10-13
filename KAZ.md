@@ -18,6 +18,9 @@ kaz の改修を移し直す手順と、見るべき場所をまとめる。背�
   `driveFolderType` で `ErrorIsDir` を返す。`NewObject` 末尾が `/` のときも同じ。1717／1759 行付近）。
   memory やバケット型の backend はこの前提を満たさないので、lookup モードの対象外。drive にこの性質を守るテストは
   今は無い（あれば `TestKazLookup*` のように足す）。
+- **backend の前提（名前の符号化）**: 名前の符号化が単射でない backend では、lookup モードが別名を解決してしまう
+  （同じ object に対する2つ目の node ができる）。drive の Enc は `EncodeInvalidUtf8` だけなので、別名になるのは
+  不正な UTF-8 の名前に限られる。JuiceFS の key は ASCII なので本番への影響はない。
 - テスト: `TestKazLookupUnsafeName`、`TestKazPathTraversalLookup`（cmd/serve/nfs）、`TestKazLookup*`、
   `TestKazCreateTrunc*`、`TestKazRemove*`、`TestKazStatCachedNormalizedDuplicate`（すべて vfs、nfs は上記1件）。
 
@@ -26,14 +29,14 @@ kaz の改修を移し直す手順と、見るべき場所をまとめる。背�
   `multipartUpload.createSink()`（`sink()` と `close()` から呼ばれる。最初の part の sink を作るときに `kazSetUploadMetadata` で
   メタデータを渡す。CreateMultipartUpload では backend に何も作らない）、`vfs` の `WriteFileHandle` が
   メタデータを Rcat に渡すこと（`vfs/kaz_upload_metadata.go`、`write.go`）、drive の upload への properties（`backend/drive/kaz_properties.go`）。
-  `PutObject`／`CopyObject`／`DeleteObject` の `backend.go` の分岐。
+  `PutObject`／`CopyObject` の `backend.go` の分岐（`DeleteObject` の分岐は persist には無い。`--no-cleanup` の分岐は error/cleanup 機能の側）。
 - 頼っている性質: `multipartUpload` が最初の part で Create すること（`--multipart-max-uploads` の前提）、
   part が逆順や0個でも sink が開けること、`WriteFileHandle` の Rcat がメタデータを受け取れること。
 - テスト: `TestKazPersist*`（`TestKazPersistMultipart`、`...OutOfOrder`、`...NoParts`、`...CreateMakesNothing`、
   `...CopySameKey`）、`TestKazUploadMetadata*`（vfs）、`TestKazFieldsIncludeProperties` ほか（drive）。
 
 ### cancel-get（`--kaz-s3-cancel-get-on-disconnect`）
-- フック点: `GetObject` の本文の組み立て（`backend.go` で `kazOpenObject` を呼ぶ）、`etagHash`（ETag のハッシュの選択）。
+- フック点: `GetObject` の本文の組み立て（`backend.go` で `kazOpenObject` を呼ぶ）。`etagHash`（ETag のハッシュの選択）はフックではなく、頼っている先（依存）。
   実装は `cmd/serve/s3/kaz_get.go`。
 - 頼っている性質: リクエストの ctx がクライアント切断で cancel されること、`--vfs-cache-mode off`。
 - テスト: `TestKazCancelGetOnDisconnect*`、`TestKazGetObjectDeletedElsewhere`。
@@ -95,6 +98,6 @@ go test -tags kazlookup -run '^TestS3$' ./cmd/serve/s3/ -count=1 \
 | `TestDirForgetAll`、`TestDirForgetPath`（vfs） | lookup モードの Stat はディレクトリを一覧しないので、item がキャッシュに載る前提が成り立たない |
 | `TestCaseSensitivity`、`TestUnicodeNormalization`（vfs） | キャッシュに無い名前は NewObject で完全一致を引くので、大文字小文字・Unicode の正規化での一致を探さない（本番は JuiceFS の ASCII の key だけで影響なし） |
 | s3 の `Memory` の副テスト: `TestMultipartAbort/Memory`、`TestMultipartAbortPreservesExisting/Memory`、`TestMultipartOverwrite/Memory`、`TestPutObjectFailurePreservesExisting/Memory/*`、`TestPutObjectFailureNewKey/Memory/*`、`TestPutObjectFailureCached/<mode>/Memory`、と memory だけの `TestMultipartNoServerSideMove`、`TestMultipartCacheModeWritesNoServerSideMove` | memory backend は `NewObject` がバケットに `ErrorIsDir` を返さず（not found）、上の「backend の前提」を満たさないので lookup モードの対象外。NoSuchBucket になる |
-| `TestS3` の `TestIntegration/FsMkdir/FsEncoding`（s3） | 観察: 一覧で返る leaf が `␀‛␁‛␂…` のように、local の quote 文字 `‛` が残った名前になり、期待の `␀␁␂…` と合わない（二重に符号化されたように見える）。後続の `FsPutFiles` などは後始末できない残りで連鎖して落ち、10分の timeout になる（FsEncoding を外すと全て通る）。lookup でなくても起きるかは未検証。本番の key は ASCII／日本語で影響なし |
+| `TestS3` の `TestIntegration/FsMkdir/FsEncoding`（s3） | 原因（最終レビューで再現）: local backend の encoder は複数の名前を同じファイルに写す（例: 制御文字の名前 "\x00\x01\x02\x7f" と記号の名前 "␀␁␂␡"）。FlushDirCache の後、upstream では `Stat("\x00\x01\x02\x7f")` は ENOENT（一覧には記号の名前しか出ない）。lookup モードでは `NewObject` が成功し、`Dir.lookup`（`vfs/dir_kaz_lookup.go`）が別名で `d.items` に2つ目の node を入れるので、1つの object に VFS の node が2つでき、一覧と食い違う。タグ無しなら FsEncoding は通る。上の「backend の前提（名前の符号化）」を参照。本番（drive、ASCII の key）では影響なし。後続の `FsPutFiles` などは後始末できない残りで連鎖して落ち、10分の timeout になる |
 
 この表に無いテストが落ちたら、仕様差か、upstream の修正の迂回かを調べる。仕様差だけを表に足す。

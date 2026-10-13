@@ -95,7 +95,7 @@ func kazExpected(t *testing.T, bucketDir, prefix string, delimiter bool) []strin
 }
 
 // kazListPage requests one page of the listing of "bucket" from b.
-func kazListPage(t *testing.T, b *s3Backend, ctx context.Context, prefix string, delimiter bool, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
+func kazListPage(ctx context.Context, b *s3Backend, prefix string, delimiter bool, page gofakes3.ListBucketPage) (*gofakes3.ObjectList, error) {
 	p := &gofakes3.Prefix{HasPrefix: prefix != "", Prefix: prefix}
 	if delimiter {
 		p.HasDelimiter, p.Delimiter = true, "/"
@@ -115,7 +115,7 @@ func kazListAll(t *testing.T, b *s3Backend, prefix string, delimiter bool, maxKe
 	page := gofakes3.ListBucketPage{MaxKeys: maxKeys}
 	for i := 0; ; i++ {
 		require.Less(t, i, 10000, "listing does not end")
-		resp, err := kazListPage(t, b, context.Background(), prefix, delimiter, page)
+		resp, err := kazListPage(context.Background(), b, prefix, delimiter, page)
 		require.NoError(t, err)
 		var items []string
 		for _, c := range resp.Contents {
@@ -171,7 +171,7 @@ func TestKazListMarkerNotAKey(t *testing.T) {
 	require.NotEmpty(t, all)
 
 	for _, marker := range []string{"", "0", "a/", "a/zzz", "a0", "a~", "zzz", all[len(all)/2] + "x"} {
-		resp, err := kazListPage(t, b, context.Background(), "", false, gofakes3.ListBucketPage{MaxKeys: 1000, HasMarker: true, Marker: marker})
+		resp, err := kazListPage(context.Background(), b, "", false, gofakes3.ListBucketPage{MaxKeys: 1000, HasMarker: true, Marker: marker})
 		require.NoError(t, err)
 		var got []string
 		for _, c := range resp.Contents {
@@ -197,7 +197,7 @@ func TestKazListHidesTempObjects(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("x"), 0666))
 	}
 
-	resp, err := kazListPage(t, b, context.Background(), "", false, gofakes3.ListBucketPage{MaxKeys: 2})
+	resp, err := kazListPage(context.Background(), b, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
 	require.NoError(t, err)
 	require.Len(t, resp.Contents, 2)
 	assert.Equal(t, "d/f1", resp.Contents[0].Key)
@@ -225,7 +225,7 @@ func TestKazListReadsOnlyNeededDirs(t *testing.T) {
 
 	b, ff, root := newKazBackend(t, false, nil)
 	makeKazFlatTree(t, root, 50)
-	resp, err := kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
+	resp, err := kazListPage(ctx, b, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
 	require.NoError(t, err)
 	assert.True(t, resp.IsTruncated)
 	assert.Equal(t, "d00/f1", resp.NextMarker)
@@ -234,7 +234,7 @@ func TestKazListReadsOnlyNeededDirs(t *testing.T) {
 	// A fresh backend has nothing cached, as after a restart.
 	b, ff, root = newKazBackend(t, false, nil)
 	makeKazFlatTree(t, root, 50)
-	resp, err = kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 2, HasMarker: true, Marker: "d40/f2"})
+	resp, err = kazListPage(ctx, b, "", false, gofakes3.ListBucketPage{MaxKeys: 2, HasMarker: true, Marker: "d40/f2"})
 	require.NoError(t, err)
 	require.Len(t, resp.Contents, 2)
 	assert.Equal(t, "d41/f0", resp.Contents[0].Key)
@@ -257,7 +257,7 @@ func TestKazListStopsOnCancel(t *testing.T) {
 		return nil
 	}
 
-	_, err := kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 1000})
+	_, err := kazListPage(ctx, b, "", false, gofakes3.ListBucketPage{MaxKeys: 1000})
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, slices.Contains(listed, "bucket/d02"), "walk must stop after the cancel: %v", listed)
 }
@@ -274,7 +274,7 @@ func TestKazListDirErrorIsNotEmpty(t *testing.T) {
 		return nil
 	}
 
-	_, err := kazListPage(t, b, context.Background(), "", false, gofakes3.ListBucketPage{MaxKeys: 1000})
+	_, err := kazListPage(context.Background(), b, "", false, gofakes3.ListBucketPage{MaxKeys: 1000})
 	assert.ErrorIs(t, err, errKaz)
 }
 
@@ -291,7 +291,7 @@ func TestKazListContinuesAfterDeletes(t *testing.T) {
 	page := gofakes3.ListBucketPage{MaxKeys: 2}
 	for i := 0; ; i++ {
 		require.Less(t, i, 100)
-		resp, err := kazListPage(t, b, ctx, "", false, page)
+		resp, err := kazListPage(ctx, b, "", false, page)
 		require.NoError(t, err)
 		for _, c := range resp.Contents {
 			got = append(got, c.Key)
@@ -318,7 +318,7 @@ func TestKazListDirRemovedElsewhere(t *testing.T) {
 	b, _, root := newKazBackend(t, false, nil)
 	makeKazFlatTree(t, root, 5)
 
-	resp, err := kazListPage(t, b, ctx, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
+	resp, err := kazListPage(ctx, b, "", false, gofakes3.ListBucketPage{MaxKeys: 2})
 	require.NoError(t, err)
 	require.True(t, resp.IsTruncated)
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "bucket", "d02")))
@@ -327,7 +327,7 @@ func TestKazListDirRemovedElsewhere(t *testing.T) {
 	page := gofakes3.ListBucketPage{MaxKeys: 2, HasMarker: true, Marker: resp.NextMarker}
 	for i := 0; ; i++ {
 		require.Less(t, i, 100)
-		resp, err = kazListPage(t, b, ctx, "", false, page)
+		resp, err = kazListPage(ctx, b, "", false, page)
 		require.NoError(t, err)
 		for _, c := range resp.Contents {
 			got = append(got, c.Key)
