@@ -54,7 +54,7 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 	params := url.Values{
 		"alt":        {"json"},
 		"uploadType": {"resumable"},
-		"fields":     {partialFields},
+		"fields":     {f.kazUploadFields()},
 	}
 	params.Set("supportsAllDrives", "true")
 	if f.opt.KeepRevisionForever {
