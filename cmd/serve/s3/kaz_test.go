@@ -22,18 +22,28 @@ import (
 )
 
 // failingFs wraps an fs.Fs and, while fail is set, makes List and NewObject
-// return errKaz like a remote rate limit would.
+// return errKaz like a remote rate limit would. It also counts List calls
+// and lets onList observe or fail them per directory.
 type failingFs struct {
 	fs.Fs
-	fail atomic.Bool
+	fail   atomic.Bool
+	lists  atomic.Int64
+	onList func(dir string) error
 }
 
 var errKaz = errors.New("kaz: simulated remote failure")
 
-// List fails while fail is set, otherwise delegates.
+// List counts the call, fails while fail is set or when onList returns an
+// error, otherwise delegates.
 func (f *failingFs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
+	f.lists.Add(1)
 	if f.fail.Load() {
 		return nil, errKaz
+	}
+	if f.onList != nil {
+		if err := f.onList(dir); err != nil {
+			return nil, err
+		}
 	}
 	return f.Fs.List(ctx, dir)
 }

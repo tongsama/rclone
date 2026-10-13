@@ -71,6 +71,11 @@ var OptionsInfo = fs.Options{{
 	Default: false,
 	Help:    "[kaz] Open the backend download of a GET with the request, so that it is canceled when the client goes away, even while the backend has not answered yet. Needs --vfs-cache-mode off",
 	Groups:  "Kaz",
+}, {
+	Name:    "kaz_s3_list_by_key_order",
+	Default: false,
+	Help:    "[kaz] Accepted for compatibility and ignored: since rclone v1.75.2 ListObjects always walks the directories in S3 key order and stops when the page is full",
+	Groups:  "Kaz",
 }}.
 	Add(httplib.ConfigInfo).
 	Add(httplib.AuthConfigInfo)
@@ -90,6 +95,7 @@ type Options struct {
 	MultipartExpiry               fs.Duration   `config:"multipart_expiry"`
 	KazPersistMetadata            bool          `config:"kaz_s3_persist_metadata"`
 	KazCancelGetOnDisconnect      bool          `config:"kaz_s3_cancel_get_on_disconnect"`
+	KazListByKeyOrder             bool          `config:"kaz_s3_list_by_key_order"` // accepted for compatibility, never read: listing is always in key order
 	Auth                          httplib.AuthConfig
 	HTTP                          httplib.Config
 }
