@@ -315,3 +315,92 @@ func TestKazPersistCopySameKeyNotImplemented(t *testing.T) {
 func kazSetXattr(path string) error {
 	return xattr.Set(path, "user.kaz-probe", []byte("1"))
 }
+
+// kazPersistMultipartServer starts a server with --kaz-s3-persist-metadata
+// and --vfs-cache-mode off on root, returning the client and bucket name.
+func kazPersistMultipartServer(t *testing.T, root string) (*minio.Core, string) {
+	t.Helper()
+	vfsOpt := vfscommon.Opt
+	vfsOpt.CacheMode = vfscommon.CacheModeOff
+	core, _, bucket := newMultipartTestServerVFS(t, root, false, func(o *Options) { o.KazPersistMetadata = true }, &vfsOpt)
+	return core, bucket
+}
+
+// TestKazPersistMultipartOutOfOrder checks the metadata reaches the object
+// when a later part arrives first and is buffered before the sink exists.
+func TestKazPersistMultipartOutOfOrder(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	kazRequireXattrs(t, root)
+	core, bucket := kazPersistMultipartServer(t, root)
+	uploadID, err := core.NewMultipartUpload(ctx, bucket, "mp", minio.PutObjectOptions{UserMetadata: map[string]string{"crc32c": "42"}})
+	require.NoError(t, err)
+	part1 := []byte(random.String(5 * 1024 * 1024))
+	part2 := []byte("tail")
+	p2, err := core.PutObjectPart(ctx, bucket, "mp", uploadID, 2, bytes.NewReader(part2), int64(len(part2)), minio.PutObjectPartOptions{})
+	require.NoError(t, err)
+	p1, err := core.PutObjectPart(ctx, bucket, "mp", uploadID, 1, bytes.NewReader(part1), int64(len(part1)), minio.PutObjectPartOptions{})
+	require.NoError(t, err)
+	_, err = core.CompleteMultipartUpload(ctx, bucket, "mp", uploadID, []minio.CompletePart{{PartNumber: 1, ETag: p1.ETag}, {PartNumber: 2, ETag: p2.ETag}}, minio.PutObjectOptions{})
+	require.NoError(t, err)
+
+	obj, err := newKazPersistBackend(t, root, time.Hour+3*time.Second).HeadObject(ctx, bucket, "mp")
+	require.NoError(t, err)
+	assert.Equal(t, "42", obj.Metadata["X-Amz-Meta-Crc32c"])
+	assert.Equal(t, int64(len(part1)+len(part2)), obj.Size)
+}
+
+// TestKazPersistMultipartNoParts checks completing an upload with no parts
+// creates an empty object which still carries the metadata.
+func TestKazPersistMultipartNoParts(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	kazRequireXattrs(t, root)
+	core, bucket := kazPersistMultipartServer(t, root)
+	uploadID, err := core.NewMultipartUpload(ctx, bucket, "empty", minio.PutObjectOptions{UserMetadata: map[string]string{"crc32c": "0"}})
+	require.NoError(t, err)
+	_, err = core.CompleteMultipartUpload(ctx, bucket, "empty", uploadID, nil, minio.PutObjectOptions{})
+	require.NoError(t, err)
+
+	obj, err := newKazPersistBackend(t, root, time.Hour+3*time.Second).HeadObject(ctx, bucket, "empty")
+	require.NoError(t, err)
+	assert.Equal(t, "0", obj.Metadata["X-Amz-Meta-Crc32c"])
+	assert.Zero(t, obj.Size)
+}
+
+// TestKazPersistMultipartCreateMakesNothing checks that, as upstream
+// requires, creating an upload with --kaz-s3-persist-metadata makes nothing
+// on the remote until the first part arrives.
+func TestKazPersistMultipartCreateMakesNothing(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	core, bucket := kazPersistMultipartServer(t, root)
+	_, err := core.NewMultipartUpload(ctx, bucket, "d/mp", minio.PutObjectOptions{UserMetadata: map[string]string{"crc32c": "1"}})
+	require.NoError(t, err)
+	var files []string
+	require.NoError(t, filepath.WalkDir(filepath.Join(root, bucket), func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			files = append(files, p)
+		}
+		return err
+	}))
+	assert.Empty(t, files, "no object may exist before the first part")
+}
+
+// TestKazPersistCopySameKey checks a metadata-only copy is refused with 501
+// and a copy of a missing object is NoSuchKey, and nothing is kept in the
+// tenant's metadata store.
+func TestKazPersistCopySameKey(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	kazRequireXattrs(t, root)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "bucket"), 0777))
+	a := newKazPersistBackend(t, root, time.Hour)
+	_, err := a.PutObject(ctx, "bucket", "k", map[string]string{"X-Amz-Meta-Crc32c": "3"}, strings.NewReader("abc"), 3)
+	require.NoError(t, err)
+	_, err = a.CopyObject(ctx, "bucket", "k", "bucket", "k", map[string]string{"X-Amz-Meta-Crc32c": "4"})
+	assert.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNotImplemented), "same key copy: %v", err)
+	_, err = a.CopyObject(ctx, "bucket", "missing", "bucket", "missing", map[string]string{})
+	assert.True(t, gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey), "missing source: %v", err)
+	assert.Zero(t, a.tenant(ctx).meta.Len(), "tenant metadata must stay empty")
+}
