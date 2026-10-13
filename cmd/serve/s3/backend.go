@@ -4,6 +4,7 @@ package s3
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"maps"
 	"math"
@@ -234,7 +235,7 @@ func (b *s3Backend) ListBucket(ctx context.Context, bucket string, prefix *gofak
 	}
 	_, err = _vfs.Stat(bucket)
 	if err != nil {
-		return nil, gofakes3.BucketNotFound(bucket)
+		return nil, bucketStatError(bucket, err)
 	}
 	if prefix == nil {
 		prefix = emptyPrefix
@@ -279,7 +280,7 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return nil, gofakes3.BucketNotFound(bucketName)
+		return nil, bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -288,7 +289,7 @@ func (b *s3Backend) HeadObject(ctx context.Context, bucketName, objectName strin
 	}
 	node, err := _vfs.Stat(fp)
 	if err != nil {
-		return nil, gofakes3.KeyNotFound(objectName)
+		return nil, keyStatError(objectName, err)
 	}
 
 	if !node.IsFile() {
@@ -336,7 +337,7 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return nil, gofakes3.BucketNotFound(bucketName)
+		return nil, bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -345,7 +346,7 @@ func (b *s3Backend) GetObject(ctx context.Context, bucketName, objectName string
 	}
 	node, err := _vfs.Stat(fp)
 	if err != nil {
-		return nil, gofakes3.KeyNotFound(objectName)
+		return nil, keyStatError(objectName, err)
 	}
 
 	if !node.IsFile() {
@@ -451,7 +452,7 @@ func (b *s3Backend) PutObject(
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return result, gofakes3.BucketNotFound(bucketName)
+		return result, bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -569,7 +570,7 @@ func (b *s3Backend) deleteObject(ctx context.Context, bucketName, objectName str
 	}
 	_, err = _vfs.Stat(bucketName)
 	if err != nil {
-		return gofakes3.BucketNotFound(bucketName)
+		return bucketStatError(bucketName, err)
 	}
 
 	fp, err := bucketObjectPath(bucketName, objectName)
@@ -583,6 +584,9 @@ func (b *s3Backend) deleteObject(ctx context.Context, bucketName, objectName str
 	}
 	b.tenant(ctx).removeMeta(fp)
 
+	if b.s.opt.NoCleanup {
+		return nil
+	}
 	// FIXME: unsafe operation
 	rmdirRecursive(fp, _vfs)
 	return nil
@@ -617,7 +621,7 @@ func (b *s3Backend) DeleteBucket(ctx context.Context, name string) error {
 	}
 	_, err = _vfs.Stat(name)
 	if err != nil {
-		return gofakes3.BucketNotFound(name)
+		return bucketStatError(name, err)
 	}
 
 	if err := _vfs.Remove(name); err != nil {
@@ -635,7 +639,11 @@ func (b *s3Backend) BucketExists(ctx context.Context, name string) (exists bool,
 	}
 	_, err = _vfs.Stat(name)
 	if err != nil {
-		return false, nil
+		if errors.Is(err, vfs.ENOENT) {
+			return false, nil
+		}
+		// Not knowing is not "absent": report the failure (500).
+		return false, err
 	}
 
 	return true, nil
@@ -652,7 +660,10 @@ func (b *s3Backend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket
 		return result, err
 	}
 	cStat, err := _vfs.Stat(fp)
-	if err != nil || !cStat.IsFile() {
+	if err != nil {
+		return result, keyStatError(srcKey, err)
+	}
+	if !cStat.IsFile() {
 		return result, gofakes3.KeyNotFound(srcKey)
 	}
 	if srcBucket == dstBucket && srcKey == dstKey {

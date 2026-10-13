@@ -175,6 +175,11 @@ var OptionsInfo = fs.Options{{
 	Default: "",
 	Help:    "Set the extension to read metadata from.",
 	Groups:  "VFS",
+}, {
+	Name:    "kaz_vfs_lookup_by_path",
+	Default: false,
+	Help:    "[kaz] Look up names missing from the directory cache with a single object lookup instead of listing the directory, and never cache misses. For remotes whose NewObject returns ErrorIsDir for directories (e.g. drive, local)",
+	Groups:  "VFS,Kaz",
 }}
 
 func init() {
@@ -216,6 +221,7 @@ type Options struct {
 	DiskSpaceTotalSize fs.SizeSuffix `config:"vfs_disk_space_total_size"`
 	HandleCaching      fs.Duration   `config:"vfs_handle_caching"`     // time to keep handle alive after last close
 	MetadataExtension  string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
+	KazLookupByPath    bool          `config:"kaz_vfs_lookup_by_path"` // kaz: resolve uncached names with NewObject instead of listing, never cache misses
 }
 
 // Opt is the default options modified by the environment variables and command line flags
