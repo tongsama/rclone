@@ -14,6 +14,7 @@ import (
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/sanitize"
 	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -465,4 +466,35 @@ func TestKazCreateTruncOnCachedDirIsEEXIST(t *testing.T) {
 
 	_, err = v.OpenFile("dir/sub", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
 	assert.True(t, errors.Is(err, EEXIST), "got %v", err)
+}
+
+// TestKazLookupUnsafeName checks lookup mode refuses the names upstream's
+// Dir.checkName refuses, so neither Stat nor the O_TRUNC create shortcut can
+// reach outside the directory.
+func TestKazLookupUnsafeName(t *testing.T) {
+	for _, mode := range []vfscommon.CacheMode{vfscommon.CacheModeOff, vfscommon.CacheModeWrites} {
+		for _, name := range []string{"..", ".", "../escape", "a/..", "sub/../.."} {
+			t.Run(fmt.Sprintf("%v/%q", mode, name), func(t *testing.T) {
+				_, _, v := newLookupVFSMode(t, true, time.Hour, mode)
+				root, err := v.Root()
+				require.NoError(t, err)
+
+				_, err = v.Stat(name)
+				assert.Error(t, err, "VFS.Stat")
+				_, err = root.Stat(name)
+				assert.Error(t, err, "Dir.Stat")
+				h, err := v.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+				if err == nil {
+					_ = h.Close()
+				}
+				assert.Error(t, err, "OpenFile O_CREATE|O_TRUNC")
+
+				root.mu.RLock()
+				defer root.mu.RUnlock()
+				for leaf := range root.items {
+					assert.NoError(t, sanitize.Leaf(leaf), "unsafe item %q cached in root", leaf)
+				}
+			})
+		}
+	}
 }

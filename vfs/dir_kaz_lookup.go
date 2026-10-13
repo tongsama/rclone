@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/lib/sanitize"
 )
 
 // lookup resolves leaf with a single Fs.NewObject call instead of listing
@@ -20,6 +21,11 @@ import (
 // It must be called without d.mu held; the remote call runs unlocked so
 // lookups of other names in the same directory are not serialised.
 func (d *Dir) lookup(leaf string) (Node, error) {
+	// A name which isn't a single safe path element can't be a child of
+	// this directory; joining it would reach outside it (see checkName).
+	if sanitize.Leaf(leaf) != nil {
+		return nil, ENOENT
+	}
 	d.mu.RLock()
 	dirPath := d.path
 	d.mu.RUnlock()
@@ -84,6 +90,10 @@ func (d *Dir) _armLookupCleanup() {
 // existing content irrelevant and the backend's Put replaces an existing
 // object, so the remote lookups Stat and Create would make are wasted.
 func (d *Dir) kazCreateNoLookup(name string) (*File, error) {
+	// Same refusal of unsafe names as Dir.Create.
+	if err := d.checkName(name); err != nil {
+		return nil, err
+	}
 	d.mu.RLock()
 	node, ok := d.items[name]
 	d.mu.RUnlock()

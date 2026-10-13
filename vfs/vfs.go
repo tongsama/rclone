@@ -623,7 +623,7 @@ func (vfs *VFS) OpenFile(name string, flags int, perm os.FileMode) (fd Handle, e
 		if err != nil {
 			return nil, err
 		}
-		if _, isMeta := vfs.isMetadataFile(leaf); !isMeta {
+		if _, isMeta := vfs.isMetadataFile(leaf); !isMeta && leaf != "" {
 			var file *File
 			file, err = dir.kazCreateNoLookup(leaf)
 			if err != nil {
